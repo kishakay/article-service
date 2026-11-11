@@ -82,6 +82,20 @@ public class Article {
         }
     }
 
+    /**
+     * Replaces editable content fields. Only {@link ArticleStatus#DRAFT} articles may be edited;
+     * published articles are immutable in this sample (revision workflows deferred).
+     *
+     * @throws ArticleNotEditableException if the article is not a draft
+     */
+    public void edit(String newTitle, String newBody) {
+        if (status != ArticleStatus.DRAFT) {
+            throw new ArticleNotEditableException(id, status);
+        }
+        title = newTitle;
+        body = newBody;
+    }
+
     @PrePersist
     void onCreate() {
         Instant now = Instant.now();
