@@ -12,7 +12,8 @@ public record ArticleResponse(
         String body,
         ArticleStatus status,
         Instant createdAt,
-        Instant updatedAt
+        Instant updatedAt,
+        Instant publishedAt
 ) {
 
     public static ArticleResponse from(Article article) {
@@ -22,7 +23,8 @@ public record ArticleResponse(
                 article.getBody(),
                 article.getStatus(),
                 article.getCreatedAt(),
-                article.getUpdatedAt()
+                article.getUpdatedAt(),
+                article.getPublishedAt()
         );
     }
 }

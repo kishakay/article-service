@@ -1,6 +1,8 @@
 package com.kishakay.articles.article;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.nullValue;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -8,6 +10,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.time.Instant;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -19,7 +22,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
 /**
- * Integration tests for {@code POST /articles}.
+ * Integration tests for article create / retrieve / publish.
  * Requires a reachable PostgreSQL instance (e.g. {@code docker compose up -d}).
  */
 @SpringBootTest
@@ -60,6 +63,7 @@ class ArticleControllerTests {
                 .andExpect(jsonPath("$.status").value("DRAFT"))
                 .andExpect(jsonPath("$.createdAt").isNotEmpty())
                 .andExpect(jsonPath("$.updatedAt").isNotEmpty())
+                .andExpect(jsonPath("$.publishedAt").value(nullValue()))
                 .andReturn();
 
         JsonNode response = objectMapper.readTree(result.getResponse().getContentAsString());
@@ -71,6 +75,7 @@ class ArticleControllerTests {
         assertThat(persisted.getStatus()).isEqualTo(ArticleStatus.DRAFT);
         assertThat(persisted.getCreatedAt()).isNotNull();
         assertThat(persisted.getUpdatedAt()).isNotNull();
+        assertThat(persisted.getPublishedAt()).isNull();
     }
 
     @Test
@@ -144,5 +149,115 @@ class ArticleControllerTests {
                 .andExpect(jsonPath("$.violations[0].field").value("body"));
 
         assertThat(articleRepository.count()).isZero();
+    }
+
+    @Test
+    void getArticle_returnsDraftIncludingNullPublishedAt() throws Exception {
+        UUID id = createDraft("Retrieve me", "<p>body</p>");
+
+        mockMvc.perform(get("/articles/{id}", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(id.toString()))
+                .andExpect(jsonPath("$.title").value("Retrieve me"))
+                .andExpect(jsonPath("$.body").value("<p>body</p>"))
+                .andExpect(jsonPath("$.status").value("DRAFT"))
+                .andExpect(jsonPath("$.publishedAt").value(nullValue()));
+    }
+
+    @Test
+    void getArticle_returns404ForUnknownId() throws Exception {
+        UUID missing = UUID.randomUUID();
+
+        mockMvc.perform(get("/articles/{id}", missing))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.message").value("Article not found"))
+                .andExpect(jsonPath("$.path").value("/articles/" + missing));
+    }
+
+    @Test
+    void getArticle_returns400ForMalformedUuid() throws Exception {
+        mockMvc.perform(get("/articles/{id}", "not-a-uuid"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message").value("Malformed UUID"))
+                .andExpect(jsonPath("$.violations[0].field").value("id"));
+    }
+
+    @Test
+    void publishArticle_transitionsDraftToPublishedAndSetsPublishedAt() throws Exception {
+        UUID id = createDraft("Ready to ship", "<p>content</p>");
+
+        MvcResult result = mockMvc.perform(post("/articles/{id}/publish", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(id.toString()))
+                .andExpect(jsonPath("$.status").value("PUBLISHED"))
+                .andExpect(jsonPath("$.publishedAt").isNotEmpty())
+                .andReturn();
+
+        JsonNode response = objectMapper.readTree(result.getResponse().getContentAsString());
+        Instant publishedAt = Instant.parse(response.get("publishedAt").asText());
+
+        Article persisted = articleRepository.findById(id).orElseThrow();
+        assertThat(persisted.getStatus()).isEqualTo(ArticleStatus.PUBLISHED);
+        assertThat(persisted.getPublishedAt()).isEqualTo(publishedAt);
+
+        mockMvc.perform(get("/articles/{id}", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PUBLISHED"))
+                .andExpect(jsonPath("$.publishedAt").value(publishedAt.toString()));
+    }
+
+    @Test
+    void publishArticle_whenAlreadyPublished_isIdempotentAndPreservesPublishedAt() throws Exception {
+        UUID id = createDraft("Ship once", "<p>once</p>");
+
+        MvcResult first = mockMvc.perform(post("/articles/{id}/publish", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PUBLISHED"))
+                .andReturn();
+
+        JsonNode firstBody = objectMapper.readTree(first.getResponse().getContentAsString());
+        String originalPublishedAt = firstBody.get("publishedAt").asText();
+
+        // Ensure clock would differ if we stamped again
+        Thread.sleep(15);
+
+        mockMvc.perform(post("/articles/{id}/publish", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PUBLISHED"))
+                .andExpect(jsonPath("$.publishedAt").value(originalPublishedAt));
+
+        Article persisted = articleRepository.findById(id).orElseThrow();
+        assertThat(persisted.getPublishedAt()).isEqualTo(Instant.parse(originalPublishedAt));
+    }
+
+    @Test
+    void publishArticle_returns404ForUnknownId() throws Exception {
+        UUID missing = UUID.randomUUID();
+
+        mockMvc.perform(post("/articles/{id}/publish", missing))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.message").value("Article not found"));
+    }
+
+    @Test
+    void publishArticle_returns400ForMalformedUuid() throws Exception {
+        mockMvc.perform(post("/articles/{id}/publish", "bad-id"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message").value("Malformed UUID"));
+    }
+
+    private UUID createDraft(String title, String body) throws Exception {
+        String payload = objectMapper.writeValueAsString(new CreateArticleRequest(title, body));
+        MvcResult result = mockMvc.perform(post("/articles")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(payload))
+                .andExpect(status().isCreated())
+                .andReturn();
+        JsonNode response = objectMapper.readTree(result.getResponse().getContentAsString());
+        return UUID.fromString(response.get("id").asText());
     }
 }

@@ -9,6 +9,7 @@ import jakarta.persistence.PrePersist;
 import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
@@ -41,6 +42,12 @@ public class Article {
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
+    /**
+     * Set once on first successful publish. Remains null while the article is a draft.
+     */
+    @Column(name = "published_at")
+    private Instant publishedAt;
+
     protected Article() {
         // JPA
     }
@@ -55,6 +62,24 @@ public class Article {
         article.body = body;
         article.status = ArticleStatus.DRAFT;
         return article;
+    }
+
+    /**
+     * Publication rules live on the aggregate:
+     * <ul>
+     *   <li>DRAFT → PUBLISHED stamps {@code publishedAt} once</li>
+     *   <li>Already PUBLISHED is a no-op (idempotent; preserves original {@code publishedAt})</li>
+     * </ul>
+     */
+    public void publish() {
+        if (status == ArticleStatus.PUBLISHED) {
+            return;
+        }
+        status = ArticleStatus.PUBLISHED;
+        if (publishedAt == null) {
+            // Truncate to micros so the in-memory stamp matches Postgres timestamptz.
+            publishedAt = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        }
     }
 
     @PrePersist
@@ -91,5 +116,9 @@ public class Article {
 
     public Instant getUpdatedAt() {
         return updatedAt;
+    }
+
+    public Instant getPublishedAt() {
+        return publishedAt;
     }
 }
