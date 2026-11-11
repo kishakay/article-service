@@ -2,6 +2,7 @@ package com.kishakay.articles.api;
 
 import com.kishakay.articles.article.ArticleNotEditableException;
 import com.kishakay.articles.article.ArticleNotFoundException;
+import com.kishakay.articles.article.InvalidPaginationException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Instant;
 import java.util.List;
@@ -104,5 +105,25 @@ public class ApiExceptionHandler {
                 List.of()
         );
         return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
+    }
+
+    @ExceptionHandler(InvalidPaginationException.class)
+    public ResponseEntity<ApiError> handleInvalidPagination(
+            InvalidPaginationException ex,
+            HttpServletRequest request
+    ) {
+        List<ApiError.FieldViolation> violations = ex.getViolations().stream()
+                .map(v -> new ApiError.FieldViolation(v.field(), v.message()))
+                .toList();
+
+        ApiError body = new ApiError(
+                Instant.now(),
+                HttpStatus.BAD_REQUEST.value(),
+                HttpStatus.BAD_REQUEST.getReasonPhrase(),
+                "Invalid pagination parameters",
+                request.getRequestURI(),
+                violations
+        );
+        return ResponseEntity.badRequest().body(body);
     }
 }

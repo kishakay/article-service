@@ -11,7 +11,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -19,11 +22,12 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
 /**
- * Integration tests for article create / retrieve / publish / edit.
+ * Integration tests for article create / retrieve / publish / edit / list.
  * Requires a reachable PostgreSQL instance (e.g. {@code docker compose up -d}).
  */
 @SpringBootTest
@@ -38,6 +42,9 @@ class ArticleControllerTests {
 
     @Autowired
     private ArticleRepository articleRepository;
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
 
     @BeforeEach
     void cleanArticles() {
@@ -390,6 +397,144 @@ class ArticleControllerTests {
                 .andExpect(jsonPath("$.path").value("/articles/" + missing));
     }
 
+    @Test
+    void listArticles_excludesDraftsAndOmitsBody() throws Exception {
+        UUID draftId = createDraft("Still drafting", "<p>secret draft body</p>");
+        UUID publishedId = createAndPublish("Live article", "<p>published body</p>");
+
+        mockMvc.perform(get("/articles"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.page").value(0))
+                .andExpect(jsonPath("$.size").value(20))
+                .andExpect(jsonPath("$.totalElements").value(1))
+                .andExpect(jsonPath("$.totalPages").value(1))
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].id").value(publishedId.toString()))
+                .andExpect(jsonPath("$.items[0].title").value("Live article"))
+                .andExpect(jsonPath("$.items[0].publishedAt").isNotEmpty())
+                .andExpect(jsonPath("$.items[0].updatedAt").isNotEmpty())
+                .andExpect(jsonPath("$.items[0].body").doesNotExist())
+                .andExpect(jsonPath("$.items[0].status").doesNotExist());
+
+        // Draft remains retrievable by id (GET /articles/{id} unchanged)
+        mockMvc.perform(get("/articles/{id}", draftId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("DRAFT"));
+    }
+
+    @Test
+    void listArticles_paginatesWithCorrectItemsAndTotals() throws Exception {
+        List<UUID> newestFirst = new ArrayList<>();
+        for (int i = 1; i <= 5; i++) {
+            newestFirst.add(0, createAndPublish("Article " + i, "<p>" + i + "</p>"));
+            Thread.sleep(15);
+        }
+
+        mockMvc.perform(get("/articles").param("page", "0").param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.page").value(0))
+                .andExpect(jsonPath("$.size").value(2))
+                .andExpect(jsonPath("$.totalElements").value(5))
+                .andExpect(jsonPath("$.totalPages").value(3))
+                .andExpect(jsonPath("$.items.length()").value(2))
+                .andExpect(jsonPath("$.items[0].id").value(newestFirst.get(0).toString()))
+                .andExpect(jsonPath("$.items[1].id").value(newestFirst.get(1).toString()));
+
+        mockMvc.perform(get("/articles").param("page", "1").param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.page").value(1))
+                .andExpect(jsonPath("$.totalElements").value(5))
+                .andExpect(jsonPath("$.totalPages").value(3))
+                .andExpect(jsonPath("$.items.length()").value(2))
+                .andExpect(jsonPath("$.items[0].id").value(newestFirst.get(2).toString()))
+                .andExpect(jsonPath("$.items[1].id").value(newestFirst.get(3).toString()));
+
+        mockMvc.perform(get("/articles").param("page", "2").param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].id").value(newestFirst.get(4).toString()));
+    }
+
+    @Test
+    void listArticles_ordersByPublishedAtDescWithStableIdTieBreaker() throws Exception {
+        UUID first = createAndPublish("Alpha", "<p>a</p>");
+        UUID second = createAndPublish("Beta", "<p>b</p>");
+
+        Instant sharedPublishedAt = Instant.parse("2024-06-15T12:00:00Z");
+        jdbcTemplate.update(
+                "UPDATE articles SET published_at = ? WHERE id IN (?, ?)",
+                Timestamp.from(sharedPublishedAt),
+                first,
+                second
+        );
+
+        List<UUID> expectedOrder = jdbcTemplate.query(
+                """
+                        SELECT id FROM articles
+                        WHERE status = 'PUBLISHED'
+                        ORDER BY published_at DESC, id ASC
+                        """,
+                (rs, rowNum) -> rs.getObject("id", UUID.class)
+        );
+        assertThat(expectedOrder).containsExactlyInAnyOrder(first, second);
+        assertThat(expectedOrder).hasSize(2);
+
+        MvcResult firstCall = mockMvc.perform(get("/articles").param("size", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalElements").value(2))
+                .andExpect(jsonPath("$.items[0].id").value(expectedOrder.get(0).toString()))
+                .andExpect(jsonPath("$.items[1].id").value(expectedOrder.get(1).toString()))
+                .andReturn();
+
+        MvcResult secondCall = mockMvc.perform(get("/articles").param("size", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[0].id").value(expectedOrder.get(0).toString()))
+                .andExpect(jsonPath("$.items[1].id").value(expectedOrder.get(1).toString()))
+                .andReturn();
+
+        assertThat(firstCall.getResponse().getContentAsString())
+                .isEqualTo(secondCall.getResponse().getContentAsString());
+    }
+
+    @Test
+    void listArticles_returnsEmptyItemsWhenNoPublishedArticles() throws Exception {
+        createDraft("Draft only", "<p>not listed</p>");
+
+        mockMvc.perform(get("/articles"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items").isArray())
+                .andExpect(jsonPath("$.items.length()").value(0))
+                .andExpect(jsonPath("$.page").value(0))
+                .andExpect(jsonPath("$.size").value(20))
+                .andExpect(jsonPath("$.totalElements").value(0))
+                .andExpect(jsonPath("$.totalPages").value(0));
+    }
+
+    @Test
+    void listArticles_rejectsNegativePage() throws Exception {
+        mockMvc.perform(get("/articles").param("page", "-1"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message").value("Invalid pagination parameters"))
+                .andExpect(jsonPath("$.path").value("/articles"))
+                .andExpect(jsonPath("$.violations[0].field").value("page"));
+    }
+
+    @Test
+    void listArticles_rejectsSizeOutsideAllowedRange() throws Exception {
+        mockMvc.perform(get("/articles").param("size", "0"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message").value("Invalid pagination parameters"))
+                .andExpect(jsonPath("$.violations[0].field").value("size"));
+
+        mockMvc.perform(get("/articles").param("size", "101"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message").value("Invalid pagination parameters"))
+                .andExpect(jsonPath("$.violations[0].field").value("size"));
+    }
+
     private UUID createDraft(String title, String body) throws Exception {
         String payload = objectMapper.writeValueAsString(new CreateArticleRequest(title, body));
         MvcResult result = mockMvc.perform(post("/articles")
@@ -399,5 +544,13 @@ class ArticleControllerTests {
                 .andReturn();
         JsonNode response = objectMapper.readTree(result.getResponse().getContentAsString());
         return UUID.fromString(response.get("id").asText());
+    }
+
+    private UUID createAndPublish(String title, String body) throws Exception {
+        UUID id = createDraft(title, body);
+        mockMvc.perform(post("/articles/{id}/publish", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PUBLISHED"));
+        return id;
     }
 }
