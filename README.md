@@ -4,7 +4,7 @@ Small Java / Spring Boot **Article Management API** interview code sample.
 
 ## Current stage
 
-**Stage 3 — retrieve and publish**
+**Stage 4 — edit article drafts**
 
 - Spring Boot 3.4 / Java 21 / Maven
 - Docker Compose PostgreSQL + Flyway (`V1` baseline, `V2` articles table, `V3` `published_at`)
@@ -12,12 +12,17 @@ Small Java / Spring Boot **Article Management API** interview code sample.
 - `POST /articles` creates a **DRAFT** article (`201` + `Location`)
 - `GET /articles/{id}` returns the article (including drafts — see note below)
 - `POST /articles/{id}/publish` transitions **DRAFT → PUBLISHED** and stamps `publishedAt` once
+- `PUT /articles/{id}` replaces title and body on **DRAFT** articles only
 
-Editing, listing, authentication, optimistic locking, and summary generation are **not** implemented yet.
+Listing, authentication, optimistic locking, and summary generation are **not** implemented yet.
 
 ### Auth deferred — drafts are readable
 
 `GET /articles/{id}` may return **DRAFT** articles. There is no authentication yet; treat this as an **editorial workflow sample**, not a production-secure public API. A later stage would gate draft visibility.
+
+### Published articles are immutable (this sample)
+
+Once published, an article cannot be edited via `PUT /articles/{id}` — the API returns `409 Conflict`. Revision workflows (new draft versions after publish) and simultaneous-edit protection (optimistic locking / ETags) are deferred.
 
 ## Out of scope (documented)
 
@@ -27,7 +32,9 @@ Editing, listing, authentication, optimistic locking, and summary generation are
 - Cloud deployment
 - Real AI summarization (a stub provider comes later)
 - Microservices split
-- Listing / editing articles (later stages)
+- Listing articles (later stage)
+- Revision / re-draft after publish
+- Optimistic locking / simultaneous-edit protection
 
 ## Prerequisites
 
@@ -106,7 +113,31 @@ Expected: HTTP `200` with `ArticleResponse` (drafts included — auth deferred).
 Unknown id → `404` with the same error envelope (`message: "Article not found"`).  
 Malformed UUID → `400` (`message: "Malformed UUID"`).
 
-### 5. Publish an article
+### 5. Edit a draft article
+
+```bash
+curl -i -X PUT http://localhost:8080/articles/<uuid> \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "title": "Revised title",
+    "body": "<p>Updated paragraph</p>"
+  }'
+```
+
+Expected:
+
+- HTTP `200`
+- Updated `title` / `body`, still `status: "DRAFT"`
+- `createdAt` unchanged; `updatedAt` refreshed
+- Clients cannot change `status`, ids, or timestamps through this request (only `title` and `body` are accepted)
+
+Same validation rules as create. Invalid input → `400` and the article is left unchanged.
+
+Editing a **PUBLISHED** article → `409 Conflict` (`message: "Published articles cannot be edited"`); the article is unchanged.
+
+Unknown id → `404`. Malformed UUID → `400`.
+
+### 6. Publish an article
 
 ```bash
 curl -i -X POST http://localhost:8080/articles/<uuid>/publish
@@ -122,7 +153,7 @@ Publishing again returns `200` with the **same** `publishedAt` (idempotent; orig
 
 Unknown id → `404`. Malformed UUID → `400`.
 
-### 6. Tests
+### 7. Tests
 
 Requires a reachable Postgres (same Compose stack):
 
@@ -150,7 +181,7 @@ Schema is owned by **Flyway**. Hibernate `ddl-auto` is `validate` so the app fai
 └── src/main/
     ├── java/com/kishakay/articles/
     │   ├── ArticleServiceApplication.java
-    │   ├── api/          # shared error envelope (400 / 404)
+    │   ├── api/          # shared error envelope (400 / 404 / 409)
     │   └── article/      # feature package (entity, DTOs, service, controller)
     └── resources/
         ├── application.yml
@@ -166,6 +197,7 @@ Schema is owned by **Flyway**. Hibernate `ddl-auto` is `validate` so the app fai
 - **DTO boundary** — controllers expose `ArticleResponse`, never the JPA entity.
 - **Creation always DRAFT** — status is set in the domain factory, not accepted from the client.
 - **Publication rules on the domain** — `Article.publish()` is idempotent and stamps `publishedAt` once; the service owns the `@Transactional` boundary.
-- **Consistent errors** — `@RestControllerAdvice` maps validation, malformed UUIDs (`400`), and missing articles (`404`) to one envelope.
+- **Edit rules on the domain** — `Article.edit(...)` allows DRAFT only; published → conflict. Service owns the write transaction; `createdAt` is preserved and `updatedAt` is refreshed via `@PreUpdate`.
+- **Consistent errors** — `@RestControllerAdvice` maps validation / malformed UUIDs (`400`), missing articles (`404`), and non-editable published articles (`409`) to one envelope.
 - **GET returns drafts** — intentional for this editorial sample; auth comes later.
 - Defaults in Compose are for **local development only**, not production secrets.

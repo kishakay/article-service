@@ -7,6 +7,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -49,5 +50,17 @@ public class ArticleController {
     @PostMapping("/{id}/publish")
     public ArticleResponse publish(@PathVariable UUID id) {
         return articleService.publish(id);
+    }
+
+    /**
+     * Replaces title and body on a DRAFT article.
+     * Published articles return {@code 409 Conflict} (immutable in this sample).
+     */
+    @PutMapping("/{id}")
+    public ArticleResponse update(
+            @PathVariable UUID id,
+            @Valid @RequestBody UpdateArticleRequest request
+    ) {
+        return articleService.update(id, request);
     }
 }

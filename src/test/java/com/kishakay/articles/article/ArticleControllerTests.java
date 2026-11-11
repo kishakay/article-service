@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.nullValue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -22,7 +23,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
 /**
- * Integration tests for article create / retrieve / publish.
+ * Integration tests for article create / retrieve / publish / edit.
  * Requires a reachable PostgreSQL instance (e.g. {@code docker compose up -d}).
  */
 @SpringBootTest
@@ -248,6 +249,145 @@ class ArticleControllerTests {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.status").value(400))
                 .andExpect(jsonPath("$.message").value("Malformed UUID"));
+    }
+
+    @Test
+    void editArticle_updatesDraftAndPersistsChanges() throws Exception {
+        UUID id = createDraft("Original title", "<p>original</p>");
+
+        Article before = articleRepository.findById(id).orElseThrow();
+        Instant originalCreatedAt = before.getCreatedAt();
+        Instant originalUpdatedAt = before.getUpdatedAt();
+
+        // Ensure updatedAt will differ after edit
+        Thread.sleep(15);
+
+        String payload = """
+                {
+                  "title": "Revised title",
+                  "body": "<p>revised</p>"
+                }
+                """;
+
+        mockMvc.perform(put("/articles/{id}", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(payload))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(id.toString()))
+                .andExpect(jsonPath("$.title").value("Revised title"))
+                .andExpect(jsonPath("$.body").value("<p>revised</p>"))
+                .andExpect(jsonPath("$.status").value("DRAFT"))
+                .andExpect(jsonPath("$.publishedAt").value(nullValue()))
+                .andExpect(jsonPath("$.createdAt").value(originalCreatedAt.toString()));
+
+        mockMvc.perform(get("/articles/{id}", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.title").value("Revised title"))
+                .andExpect(jsonPath("$.body").value("<p>revised</p>"))
+                .andExpect(jsonPath("$.status").value("DRAFT"))
+                .andExpect(jsonPath("$.createdAt").value(originalCreatedAt.toString()));
+
+        Article persisted = articleRepository.findById(id).orElseThrow();
+        assertThat(persisted.getTitle()).isEqualTo("Revised title");
+        assertThat(persisted.getBody()).isEqualTo("<p>revised</p>");
+        assertThat(persisted.getStatus()).isEqualTo(ArticleStatus.DRAFT);
+        assertThat(persisted.getCreatedAt()).isEqualTo(originalCreatedAt);
+        assertThat(persisted.getUpdatedAt()).isAfter(originalUpdatedAt);
+        assertThat(persisted.getPublishedAt()).isNull();
+    }
+
+    @Test
+    void editArticle_rejectsInvalidInputAndLeavesArticleUnchanged() throws Exception {
+        UUID id = createDraft("Keep me", "<p>unchanged</p>");
+
+        Article before = articleRepository.findById(id).orElseThrow();
+        Instant originalUpdatedAt = before.getUpdatedAt();
+
+        String payload = """
+                {
+                  "title": "   ",
+                  "body": "<p>should not save</p>"
+                }
+                """;
+
+        mockMvc.perform(put("/articles/{id}", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(payload))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message").value("Validation failed"))
+                .andExpect(jsonPath("$.violations[0].field").value("title"));
+
+        Article persisted = articleRepository.findById(id).orElseThrow();
+        assertThat(persisted.getTitle()).isEqualTo("Keep me");
+        assertThat(persisted.getBody()).isEqualTo("<p>unchanged</p>");
+        assertThat(persisted.getStatus()).isEqualTo(ArticleStatus.DRAFT);
+        assertThat(persisted.getUpdatedAt()).isEqualTo(originalUpdatedAt);
+
+        mockMvc.perform(get("/articles/{id}", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.title").value("Keep me"))
+                .andExpect(jsonPath("$.body").value("<p>unchanged</p>"));
+    }
+
+    @Test
+    void editArticle_rejectsPublishedWithoutChangingIt() throws Exception {
+        UUID id = createDraft("Ship then lock", "<p>final</p>");
+
+        mockMvc.perform(post("/articles/{id}/publish", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PUBLISHED"));
+
+        Article before = articleRepository.findById(id).orElseThrow();
+        Instant originalUpdatedAt = before.getUpdatedAt();
+        Instant originalPublishedAt = before.getPublishedAt();
+
+        String payload = """
+                {
+                  "title": "Attempted rewrite",
+                  "body": "<p>should not apply</p>"
+                }
+                """;
+
+        mockMvc.perform(put("/articles/{id}", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(payload))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.status").value(409))
+                .andExpect(jsonPath("$.message").value("Published articles cannot be edited"))
+                .andExpect(jsonPath("$.path").value("/articles/" + id));
+
+        Article persisted = articleRepository.findById(id).orElseThrow();
+        assertThat(persisted.getTitle()).isEqualTo("Ship then lock");
+        assertThat(persisted.getBody()).isEqualTo("<p>final</p>");
+        assertThat(persisted.getStatus()).isEqualTo(ArticleStatus.PUBLISHED);
+        assertThat(persisted.getUpdatedAt()).isEqualTo(originalUpdatedAt);
+        assertThat(persisted.getPublishedAt()).isEqualTo(originalPublishedAt);
+
+        mockMvc.perform(get("/articles/{id}", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.title").value("Ship then lock"))
+                .andExpect(jsonPath("$.body").value("<p>final</p>"))
+                .andExpect(jsonPath("$.status").value("PUBLISHED"));
+    }
+
+    @Test
+    void editArticle_returns404ForUnknownId() throws Exception {
+        UUID missing = UUID.randomUUID();
+        String payload = """
+                {
+                  "title": "Does not matter",
+                  "body": "<p>missing</p>"
+                }
+                """;
+
+        mockMvc.perform(put("/articles/{id}", missing)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(payload))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.message").value("Article not found"))
+                .andExpect(jsonPath("$.path").value("/articles/" + missing));
     }
 
     private UUID createDraft(String title, String body) throws Exception {

@@ -1,5 +1,6 @@
 package com.kishakay.articles.api;
 
+import com.kishakay.articles.article.ArticleNotEditableException;
 import com.kishakay.articles.article.ArticleNotFoundException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Instant;
@@ -87,5 +88,21 @@ public class ApiExceptionHandler {
                 List.of()
         );
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(body);
+    }
+
+    @ExceptionHandler(ArticleNotEditableException.class)
+    public ResponseEntity<ApiError> handleNotEditable(
+            ArticleNotEditableException ex,
+            HttpServletRequest request
+    ) {
+        ApiError body = new ApiError(
+                Instant.now(),
+                HttpStatus.CONFLICT.value(),
+                HttpStatus.CONFLICT.getReasonPhrase(),
+                "Published articles cannot be edited",
+                request.getRequestURI(),
+                List.of()
+        );
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
     }
 }

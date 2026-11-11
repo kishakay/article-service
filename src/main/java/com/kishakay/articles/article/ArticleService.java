@@ -46,6 +46,19 @@ public class ArticleService {
         return ArticleResponse.from(saved);
     }
 
+    /**
+     * Transaction boundary for draft edits. Domain rules (DRAFT-only; published is immutable)
+     * live on {@link Article#edit(String, String)}. Bean Validation runs before this method.
+     */
+    @Transactional
+    public ArticleResponse update(UUID id, UpdateArticleRequest request) {
+        Article article = requireArticle(id);
+        article.edit(request.title(), request.body());
+        // Flush so @PreUpdate updatedAt is present in the response body.
+        Article saved = articleRepository.saveAndFlush(article);
+        return ArticleResponse.from(saved);
+    }
+
     private Article requireArticle(UUID id) {
         return articleRepository.findById(id)
                 .orElseThrow(() -> new ArticleNotFoundException(id));
