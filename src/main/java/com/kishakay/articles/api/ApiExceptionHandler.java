@@ -3,6 +3,8 @@ package com.kishakay.articles.api;
 import com.kishakay.articles.article.ArticleNotEditableException;
 import com.kishakay.articles.article.ArticleNotFoundException;
 import com.kishakay.articles.article.InvalidPaginationException;
+import com.kishakay.articles.article.SummaryPreviewNotAllowedException;
+import com.kishakay.articles.article.SummaryProviderUnavailableException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Instant;
 import java.util.List;
@@ -125,5 +127,37 @@ public class ApiExceptionHandler {
                 violations
         );
         return ResponseEntity.badRequest().body(body);
+    }
+
+    @ExceptionHandler(SummaryPreviewNotAllowedException.class)
+    public ResponseEntity<ApiError> handleSummaryPreviewNotAllowed(
+            SummaryPreviewNotAllowedException ex,
+            HttpServletRequest request
+    ) {
+        ApiError body = new ApiError(
+                Instant.now(),
+                HttpStatus.CONFLICT.value(),
+                HttpStatus.CONFLICT.getReasonPhrase(),
+                "Summary preview is only available for draft articles",
+                request.getRequestURI(),
+                List.of()
+        );
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
+    }
+
+    @ExceptionHandler(SummaryProviderUnavailableException.class)
+    public ResponseEntity<ApiError> handleSummaryProviderUnavailable(
+            SummaryProviderUnavailableException ex,
+            HttpServletRequest request
+    ) {
+        ApiError body = new ApiError(
+                Instant.now(),
+                HttpStatus.SERVICE_UNAVAILABLE.value(),
+                HttpStatus.SERVICE_UNAVAILABLE.getReasonPhrase(),
+                "Summary provider unavailable",
+                request.getRequestURI(),
+                List.of()
+        );
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(body);
     }
 }
