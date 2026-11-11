@@ -2,7 +2,7 @@ package com.kishakay.articles.article;
 
 /**
  * Lifecycle status for an article.
- * Stage 2 only creates {@link #DRAFT}; publishing comes later.
+ * Creation always starts as {@link #DRAFT}; {@link #PUBLISHED} is set via domain publish.
  */
 public enum ArticleStatus {
     DRAFT,

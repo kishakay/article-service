@@ -4,14 +4,20 @@ Small Java / Spring Boot **Article Management API** interview code sample.
 
 ## Current stage
 
-**Stage 2 — create article draft**
+**Stage 3 — retrieve and publish**
 
 - Spring Boot 3.4 / Java 21 / Maven
-- Docker Compose PostgreSQL + Flyway (`V1` baseline, `V2` articles table)
+- Docker Compose PostgreSQL + Flyway (`V1` baseline, `V2` articles table, `V3` `published_at`)
 - Hibernate `ddl-auto: validate` (schema owned by Flyway)
-- `POST /articles` creates a **DRAFT** article and returns `201 Created` with a `Location` header
+- `POST /articles` creates a **DRAFT** article (`201` + `Location`)
+- `GET /articles/{id}` returns the article (including drafts — see note below)
+- `POST /articles/{id}/publish` transitions **DRAFT → PUBLISHED** and stamps `publishedAt` once
 
-Publishing, editing, authentication, and summary generation are **not** implemented yet.
+Editing, listing, authentication, optimistic locking, and summary generation are **not** implemented yet.
+
+### Auth deferred — drafts are readable
+
+`GET /articles/{id}` may return **DRAFT** articles. There is no authentication yet; treat this as an **editorial workflow sample**, not a production-secure public API. A later stage would gate draft visibility.
 
 ## Out of scope (documented)
 
@@ -21,7 +27,7 @@ Publishing, editing, authentication, and summary generation are **not** implemen
 - Cloud deployment
 - Real AI summarization (a stub provider comes later)
 - Microservices split
-- Publishing / editing articles (later stages)
+- Listing / editing articles (later stages)
 
 ## Prerequisites
 
@@ -60,7 +66,7 @@ export DB_PASSWORD=articles
 mvn spring-boot:run
 ```
 
-On successful startup you should see Flyway apply `V1__baseline` and `V2__create_articles`, then `Started ArticleServiceApplication`.
+On successful startup you should see Flyway apply `V1`–`V3`, then `Started ArticleServiceApplication`.
 
 ### 3. Create a draft article
 
@@ -77,7 +83,7 @@ Expected:
 
 - HTTP `201 Created`
 - `Location: http://localhost:8080/articles/<uuid>`
-- JSON body with `id`, `title`, `body`, `status: "DRAFT"`, `createdAt`, `updatedAt`
+- JSON body with `id`, `title`, `body`, `status: "DRAFT"`, `createdAt`, `updatedAt`, and `publishedAt: null` (omitted/null)
 
 Validation rules:
 
@@ -88,7 +94,35 @@ Validation rules:
 
 Invalid input returns `400 Bad Request` with a consistent error envelope (`message`, `violations[]`).
 
-### 4. Tests
+### 4. Retrieve an article by id
+
+```bash
+# Replace <uuid> with the id from the create response (or Location header)
+curl -i http://localhost:8080/articles/<uuid>
+```
+
+Expected: HTTP `200` with `ArticleResponse` (drafts included — auth deferred).
+
+Unknown id → `404` with the same error envelope (`message: "Article not found"`).  
+Malformed UUID → `400` (`message: "Malformed UUID"`).
+
+### 5. Publish an article
+
+```bash
+curl -i -X POST http://localhost:8080/articles/<uuid>/publish
+```
+
+Expected:
+
+- HTTP `200`
+- `status: "PUBLISHED"`
+- `publishedAt` set to the first publish time
+
+Publishing again returns `200` with the **same** `publishedAt` (idempotent; original stamp preserved).
+
+Unknown id → `404`. Malformed UUID → `400`.
+
+### 6. Tests
 
 Requires a reachable Postgres (same Compose stack):
 
@@ -116,13 +150,14 @@ Schema is owned by **Flyway**. Hibernate `ddl-auto` is `validate` so the app fai
 └── src/main/
     ├── java/com/kishakay/articles/
     │   ├── ArticleServiceApplication.java
-    │   ├── api/          # shared error envelope
+    │   ├── api/          # shared error envelope (400 / 404)
     │   └── article/      # feature package (entity, DTOs, service, controller)
     └── resources/
         ├── application.yml
         └── db/migration/
             ├── V1__baseline.sql
-            └── V2__create_articles.sql
+            ├── V2__create_articles.sql
+            └── V3__add_published_at.sql
 ```
 
 ## Design notes
@@ -130,6 +165,7 @@ Schema is owned by **Flyway**. Hibernate `ddl-auto` is `validate` so the app fai
 - **Flyway owns schema; Hibernate validates** — keeps migrations authoritative and catches mapping drift at startup.
 - **DTO boundary** — controllers expose `ArticleResponse`, never the JPA entity.
 - **Creation always DRAFT** — status is set in the domain factory, not accepted from the client.
-- **Bean Validation on the request** plus a `@RestControllerAdvice` — one consistent `400` shape for blank / oversized fields.
-- **`@Transactional` on the service** — persistence boundary stays in one place for later stages (publish/edit).
+- **Publication rules on the domain** — `Article.publish()` is idempotent and stamps `publishedAt` once; the service owns the `@Transactional` boundary.
+- **Consistent errors** — `@RestControllerAdvice` maps validation, malformed UUIDs (`400`), and missing articles (`404`) to one envelope.
+- **GET returns drafts** — intentional for this editorial sample; auth comes later.
 - Defaults in Compose are for **local development only**, not production secrets.
