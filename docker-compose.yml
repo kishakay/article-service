@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: article-service-db
+    environment:
+      POSTGRES_DB: articles
+      POSTGRES_USER: articles
+      POSTGRES_PASSWORD: articles
+    ports:
+      - "5432:5432"
+    volumes:
+      - article_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U articles -d articles"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  article_pg_data:
