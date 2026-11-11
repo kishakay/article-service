@@ -18,13 +18,15 @@ Small Java / Spring Boot **Article Management API** interview code sample.
 
 Authentication, search/categories, optimistic locking, author review / saving of summaries, and real AI summarization are **not** implemented yet.
 
+**Interview demo:** see [`docs/interview-walkthrough.md`](docs/interview-walkthrough.md) for a reproducible `curl` + `jq` script (create → edit → stub summary → publish → republish → list → 409 → 404), design trade-offs, and known limitations.
+
 ### Auth deferred — drafts are readable by id
 
 `GET /articles/{id}` may return **DRAFT** articles. The collection endpoint `GET /articles` never includes drafts. There is no authentication yet; treat this as an **editorial workflow sample**, not a production-secure public API. A later stage would gate draft visibility.
 
 ### Published articles are immutable (this sample)
 
-Once published, an article cannot be edited via `PUT /articles/{id}` — the API returns `409 Conflict`. Revision workflows (new draft versions after publish) and simultaneous-edit protection (optimistic locking / ETags) are deferred.
+Once published, an article cannot be edited via `PUT /articles/{id}` — the API returns `409 Conflict`. Revision workflows (new draft versions after publish) and simultaneous-edit protection (optimistic locking / ETags / edit–publish race handling) are deferred.
 
 ### Offset pagination choice and limitations
 
@@ -47,25 +49,22 @@ Results are ordered by `publishedAt` descending, with `id` ascending as a determ
 
 A real provider can replace the stub by implementing `SummaryProvider` and registering that Spring bean instead (constructor-injected into `ArticleService`). Author review and persisting summaries are deferred to a later stage.
 
-## Out of scope (documented)
+## Known limitations
 
-- Authentication / authorization (none; do not treat this API as secured)
-- Frontend / UI
-- Media uploads
-- Cloud deployment
-- Real AI summarization (stub provider only — no SDK, credentials, retries, caching, or async jobs)
-- Author review / saving of generated summaries
-- Microservices split
-- Search / categories / full-text filters
-- Revision / re-draft after publish
-- Optimistic locking / simultaneous-edit protection
-- Cursor / keyset pagination
+- **No authentication or authorisation** — do not treat this API as secured.
+- **Individual retrieval exposes drafts** — `GET /articles/{id}` returns DRAFT articles; only `GET /articles` is published-only.
+- **No protection against concurrent edits or edit/publish races** — no optimistic locking, ETags, or versioning; last write wins.
+- **Stub summary provider only** — labelled sample string; no real AI, persistence, or author-review save flow.
+- **No real media handling or cloud deployment** — no uploads/object storage; Compose credentials are local-dev defaults.
+
+Also out of scope: frontend / UI, microservices split, search / categories, post-publish revisions, cursor / keyset pagination.
 
 ## Prerequisites
 
 - Java 21+
 - Maven 3.9+ (3.8+ works)
 - Docker + Docker Compose
+- `curl` + `jq` (for the interview walkthrough script)
 
 ## Quick start
 
@@ -100,7 +99,9 @@ mvn spring-boot:run
 
 On successful startup you should see Flyway apply `V1`–`V4`, then `Started ArticleServiceApplication`.
 
-### 3. Create a draft article
+### 3. Create a draft and capture its id
+
+Inspect headers + body:
 
 ```bash
 curl -i -X POST http://localhost:8080/articles \
@@ -111,11 +112,20 @@ curl -i -X POST http://localhost:8080/articles \
   }'
 ```
 
+Capture the id for later steps (preferred for a reproducible demo — no hard-coded UUID):
+
+```bash
+ARTICLE_ID=$(curl -s -X POST http://localhost:8080/articles \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"Hello draft","body":"<p>First paragraph</p>"}' | jq -r '.id')
+echo "ARTICLE_ID=$ARTICLE_ID"
+```
+
 Expected:
 
 - HTTP `201 Created`
 - `Location: http://localhost:8080/articles/<uuid>`
-- JSON body with `id`, `title`, `body`, `status: "DRAFT"`, `createdAt`, `updatedAt`, and `publishedAt: null` (omitted/null)
+- JSON body with `id`, `title`, `body`, `status: "DRAFT"`, `createdAt`, `updatedAt`, and `publishedAt: null`
 
 Validation rules:
 
@@ -129,8 +139,7 @@ Invalid input returns `400 Bad Request` with a consistent error envelope (`messa
 ### 4. Retrieve an article by id
 
 ```bash
-# Replace <uuid> with the id from the create response (or Location header)
-curl -i http://localhost:8080/articles/<uuid>
+curl -i "http://localhost:8080/articles/$ARTICLE_ID"
 ```
 
 Expected: HTTP `200` with `ArticleResponse` (drafts included — auth deferred).
@@ -141,7 +150,7 @@ Malformed UUID → `400` (`message: "Malformed UUID"`).
 ### 5. Edit a draft article
 
 ```bash
-curl -i -X PUT http://localhost:8080/articles/<uuid> \
+curl -i -X PUT "http://localhost:8080/articles/$ARTICLE_ID" \
   -H 'Content-Type: application/json' \
   -d '{
     "title": "Revised title",
@@ -162,10 +171,40 @@ Editing a **PUBLISHED** article → `409 Conflict` (`message: "Published article
 
 Unknown id → `404`. Malformed UUID → `400`.
 
-### 6. Publish an article
+### 6. Preview a summary (draft only — stub)
 
 ```bash
-curl -i -X POST http://localhost:8080/articles/<uuid>/publish
+curl -i -X POST "http://localhost:8080/articles/$ARTICLE_ID/summary-preview"
+```
+
+Expected (DRAFT):
+
+- HTTP `200`
+- Body shape:
+
+```json
+{
+  "articleId": "<captured-uuid>",
+  "summary": "[STUB SUMMARY] This is a sample preview. It does not summarise the article content.",
+  "provider": "stub"
+}
+```
+
+Important:
+
+- The stub **does not summarise** the article — the `summary` string is a fixed labelled sample
+- Nothing is persisted; article `status`, `updatedAt`, and content are unchanged
+- Author review and saving summaries are **deferred**
+- To swap in a real provider later: implement `SummaryProvider`, expose it as the Spring bean (instead of `StubSummaryProvider`), and keep the same endpoint/DTO
+
+**PUBLISHED** article → `409 Conflict` (`message: "Summary preview is only available for draft articles"`).  
+Unknown id → `404` (`message: "Article not found"`).  
+Provider unavailable (`SummaryProviderUnavailableException`) → `503` (`message: "Summary provider unavailable"`). Unexpected failures are **not** mapped to 503.
+
+### 7. Publish an article
+
+```bash
+curl -i -X POST "http://localhost:8080/articles/$ARTICLE_ID/publish"
 ```
 
 Expected:
@@ -174,11 +213,16 @@ Expected:
 - `status: "PUBLISHED"`
 - `publishedAt` set to the first publish time
 
-Publishing again returns `200` with the **same** `publishedAt` (idempotent; original stamp preserved).
+Publishing again returns `200` with the **same** `publishedAt` (idempotent; original stamp preserved). Compare with `jq`:
+
+```bash
+PUBLISHED_AT=$(curl -s -X POST "http://localhost:8080/articles/$ARTICLE_ID/publish" | jq -r '.publishedAt')
+curl -s -X POST "http://localhost:8080/articles/$ARTICLE_ID/publish" | jq -r --arg p "$PUBLISHED_AT" 'select(.publishedAt == $p) | .publishedAt'
+```
 
 Unknown id → `404`. Malformed UUID → `400`.
 
-### 7. List published articles
+### 8. List published articles
 
 ```bash
 # Defaults: page=0, size=20
@@ -217,37 +261,21 @@ Notes:
 - No published rows → `200` with `"items": []`, `totalElements: 0`, `totalPages: 0`
 - `page < 0` or `size` outside 1–100 → `400` (`message: "Invalid pagination parameters"`, `violations[]`)
 
-### 8. Preview a summary (draft only — stub)
+### 9. After publish: 409 on edit, 404 on unknown id
 
 ```bash
-curl -i -X POST http://localhost:8080/articles/<uuid>/summary-preview
+# 409 — published articles are immutable in this sample
+curl -i -X PUT "http://localhost:8080/articles/$ARTICLE_ID" \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"Should fail","body":"<p>nope</p>"}'
+
+# 404 — fixed unknown UUID (no need to invent one at random)
+curl -i http://localhost:8080/articles/00000000-0000-4000-8000-000000000000
 ```
 
-Expected (DRAFT):
+For the full scripted path in one block, see [`docs/interview-walkthrough.md`](docs/interview-walkthrough.md).
 
-- HTTP `200`
-- Body shape:
-
-```json
-{
-  "articleId": "<uuid>",
-  "summary": "[STUB SUMMARY] This is a sample preview. It does not summarise the article content.",
-  "provider": "stub"
-}
-```
-
-Important:
-
-- The stub **does not summarise** the article — the `summary` string is a fixed labelled sample
-- Nothing is persisted; article `status`, `updatedAt`, and content are unchanged
-- Author review and saving summaries are **deferred**
-- To swap in a real provider later: implement `SummaryProvider`, expose it as the Spring bean (instead of `StubSummaryProvider`), and keep the same endpoint/DTO
-
-**PUBLISHED** article → `409 Conflict` (`message: "Summary preview is only available for draft articles"`).  
-Unknown id → `404` (`message: "Article not found"`).  
-Provider unavailable (`SummaryProviderUnavailableException`) → `503` (`message: "Summary provider unavailable"`). Unexpected failures are **not** mapped to 503.
-
-### 9. Tests
+### 10. Tests
 
 Requires a reachable Postgres (same Compose stack):
 
@@ -272,6 +300,8 @@ Schema is owned by **Flyway**. Hibernate `ddl-auto` is `validate` so the app fai
 ├── docker-compose.yml
 ├── pom.xml
 ├── README.md
+├── docs/
+│   └── interview-walkthrough.md   # runnable demo + design trade-offs
 └── src/main/
     ├── java/com/kishakay/articles/
     │   ├── ArticleServiceApplication.java
@@ -288,12 +318,14 @@ Schema is owned by **Flyway**. Hibernate `ddl-auto` is `validate` so the app fai
 
 ## Design notes
 
-- **Flyway owns schema; Hibernate validates** — keeps migrations authoritative and catches mapping drift at startup.
+Short list below; trade-offs are expanded in [`docs/interview-walkthrough.md`](docs/interview-walkthrough.md).
+
+- **Flyway owns schema; Hibernate validates** — migrations authoritative; startup fails on mapping drift (no Hibernate auto-evolve).
 - **DTO boundary** — controllers expose response DTOs, never the JPA entity. Listing uses a slim item DTO without HTML body.
 - **Creation always DRAFT** — status is set in the domain factory, not accepted from the client.
 - **Publication rules on the domain** — `Article.publish()` is idempotent and stamps `publishedAt` once; the service owns the `@Transactional` boundary.
-- **Edit rules on the domain** — `Article.edit(...)` allows DRAFT only; published → conflict. Service owns the write transaction; `createdAt` is preserved and `updatedAt` is refreshed via `@PreUpdate`.
-- **Published listing in the database** — `findByStatus(PUBLISHED, pageable)` applies filter + `ORDER BY published_at DESC, id ASC` + limit/offset in SQL; partial index `idx_articles_published_list` supports the access path.
+- **Edit rules on the domain** — `Article.edit(...)` allows DRAFT only; published → `409` (not an idempotent no-op). Service owns the write transaction; `createdAt` preserved, `updatedAt` via `@PreUpdate`.
+- **Published listing in the database** — `findByStatus(PUBLISHED, pageable)` applies filter + `ORDER BY published_at DESC, id ASC` + limit/offset in SQL; partial index `idx_articles_published_list` supports the access path. Offset is simple for demos; keyset would be stabler under inserts.
 - **Summary preview via replaceable port** — `SummaryProvider` is constructor-injected; `StubSummaryProvider` is the default bean. Preview loads the draft first, then calls the provider **outside** a service-level transaction (`open-in-view` is already `false`) so DB work finishes before summarisation. Typed `SummaryProviderUnavailableException` → `503` only; no catch-all.
 - **Preview is not a write** — no summary column, no status/timestamp mutation; author review / save deferred.
 - **Consistent errors** — `@RestControllerAdvice` maps validation / malformed UUIDs / bad pagination (`400`), missing articles (`404`), non-editable / non-previewable published articles (`409`), and expected provider unavailability (`503`) to one envelope.
