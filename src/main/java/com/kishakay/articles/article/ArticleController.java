@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
@@ -32,6 +33,18 @@ public class ArticleController {
                 .buildAndExpand(created.id())
                 .toUri();
         return ResponseEntity.created(location).body(created);
+    }
+
+    /**
+     * Lists published articles only (drafts excluded). Offset pagination:
+     * {@code page} defaults to 0, {@code size} defaults to 20 (max 100).
+     */
+    @GetMapping
+    public ArticlePageResponse listPublished(
+            @RequestParam(defaultValue = "" + ArticleConstraints.PAGE_DEFAULT) int page,
+            @RequestParam(defaultValue = "" + ArticleConstraints.SIZE_DEFAULT) int size
+    ) {
+        return articleService.listPublished(page, size);
     }
 
     /**

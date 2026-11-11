@@ -4,25 +4,41 @@ Small Java / Spring Boot **Article Management API** interview code sample.
 
 ## Current stage
 
-**Stage 4 — edit article drafts**
+**Stage 5 — paginated published listing**
 
 - Spring Boot 3.4 / Java 21 / Maven
-- Docker Compose PostgreSQL + Flyway (`V1` baseline, `V2` articles table, `V3` `published_at`)
+- Docker Compose PostgreSQL + Flyway (`V1` baseline, `V2` articles table, `V3` `published_at`, `V4` published-list index)
 - Hibernate `ddl-auto: validate` (schema owned by Flyway)
 - `POST /articles` creates a **DRAFT** article (`201` + `Location`)
+- `GET /articles` returns **PUBLISHED** articles only (offset pagination)
 - `GET /articles/{id}` returns the article (including drafts — see note below)
 - `POST /articles/{id}/publish` transitions **DRAFT → PUBLISHED** and stamps `publishedAt` once
 - `PUT /articles/{id}` replaces title and body on **DRAFT** articles only
 
-Listing, authentication, optimistic locking, and summary generation are **not** implemented yet.
+Authentication, search/categories, optimistic locking, and summary generation are **not** implemented yet.
 
-### Auth deferred — drafts are readable
+### Auth deferred — drafts are readable by id
 
-`GET /articles/{id}` may return **DRAFT** articles. There is no authentication yet; treat this as an **editorial workflow sample**, not a production-secure public API. A later stage would gate draft visibility.
+`GET /articles/{id}` may return **DRAFT** articles. The collection endpoint `GET /articles` never includes drafts. There is no authentication yet; treat this as an **editorial workflow sample**, not a production-secure public API. A later stage would gate draft visibility.
 
 ### Published articles are immutable (this sample)
 
 Once published, an article cannot be edited via `PUT /articles/{id}` — the API returns `409 Conflict`. Revision workflows (new draft versions after publish) and simultaneous-edit protection (optimistic locking / ETags) are deferred.
+
+### Offset pagination choice and limitations
+
+`GET /articles` uses **offset pagination** (`page` + `size`):
+
+| Param  | Default | Constraints                          |
+|--------|---------|--------------------------------------|
+| `page` | `0`     | must be ≥ 0                          |
+| `size` | `20`    | must be between **1** and **100**    |
+
+Results are ordered by `publishedAt` descending, with `id` ascending as a deterministic tie-breaker. Filtering, sorting, and `LIMIT`/`OFFSET` run in PostgreSQL (backed by partial index `idx_articles_published_list`).
+
+**Why offset for this sample:** it is simple for clients, easy to reason about totals (`totalElements` / `totalPages`), and enough for an interview demo with modest catalogs.
+
+**Limitations:** when new articles are published between requests, offsets shift. Page `1` after a publish can repeat or skip items that appeared on page `0` earlier. Cursor / keyset pagination (`publishedAt` + `id` seek) would be more stable under inserts; deferred here to keep Stage 5 focused.
 
 ## Out of scope (documented)
 
@@ -32,9 +48,10 @@ Once published, an article cannot be edited via `PUT /articles/{id}` — the API
 - Cloud deployment
 - Real AI summarization (a stub provider comes later)
 - Microservices split
-- Listing articles (later stage)
+- Search / categories / full-text filters
 - Revision / re-draft after publish
 - Optimistic locking / simultaneous-edit protection
+- Cursor / keyset pagination
 
 ## Prerequisites
 
@@ -73,7 +90,7 @@ export DB_PASSWORD=articles
 mvn spring-boot:run
 ```
 
-On successful startup you should see Flyway apply `V1`–`V3`, then `Started ArticleServiceApplication`.
+On successful startup you should see Flyway apply `V1`–`V4`, then `Started ArticleServiceApplication`.
 
 ### 3. Create a draft article
 
@@ -153,7 +170,46 @@ Publishing again returns `200` with the **same** `publishedAt` (idempotent; orig
 
 Unknown id → `404`. Malformed UUID → `400`.
 
-### 7. Tests
+### 7. List published articles
+
+```bash
+# Defaults: page=0, size=20
+curl -i 'http://localhost:8080/articles'
+
+# Explicit page / size
+curl -i 'http://localhost:8080/articles?page=0&size=10'
+```
+
+Expected:
+
+- HTTP `200`
+- Body shape:
+
+```json
+{
+  "items": [
+    {
+      "id": "...",
+      "title": "...",
+      "publishedAt": "...",
+      "updatedAt": "..."
+    }
+  ],
+  "page": 0,
+  "size": 10,
+  "totalElements": 1,
+  "totalPages": 1
+}
+```
+
+Notes:
+
+- Only **PUBLISHED** articles appear (drafts are excluded)
+- List items omit HTML `body` (and `status` / `createdAt`)
+- No published rows → `200` with `"items": []`, `totalElements: 0`, `totalPages: 0`
+- `page < 0` or `size` outside 1–100 → `400` (`message: "Invalid pagination parameters"`, `violations[]`)
+
+### 8. Tests
 
 Requires a reachable Postgres (same Compose stack):
 
@@ -188,16 +244,18 @@ Schema is owned by **Flyway**. Hibernate `ddl-auto` is `validate` so the app fai
         └── db/migration/
             ├── V1__baseline.sql
             ├── V2__create_articles.sql
-            └── V3__add_published_at.sql
+            ├── V3__add_published_at.sql
+            └── V4__index_published_articles_list.sql
 ```
 
 ## Design notes
 
 - **Flyway owns schema; Hibernate validates** — keeps migrations authoritative and catches mapping drift at startup.
-- **DTO boundary** — controllers expose `ArticleResponse`, never the JPA entity.
+- **DTO boundary** — controllers expose response DTOs, never the JPA entity. Listing uses a slim item DTO without HTML body.
 - **Creation always DRAFT** — status is set in the domain factory, not accepted from the client.
 - **Publication rules on the domain** — `Article.publish()` is idempotent and stamps `publishedAt` once; the service owns the `@Transactional` boundary.
 - **Edit rules on the domain** — `Article.edit(...)` allows DRAFT only; published → conflict. Service owns the write transaction; `createdAt` is preserved and `updatedAt` is refreshed via `@PreUpdate`.
-- **Consistent errors** — `@RestControllerAdvice` maps validation / malformed UUIDs (`400`), missing articles (`404`), and non-editable published articles (`409`) to one envelope.
-- **GET returns drafts** — intentional for this editorial sample; auth comes later.
+- **Published listing in the database** — `findByStatus(PUBLISHED, pageable)` applies filter + `ORDER BY published_at DESC, id ASC` + limit/offset in SQL; partial index `idx_articles_published_list` supports the access path.
+- **Consistent errors** — `@RestControllerAdvice` maps validation / malformed UUIDs / bad pagination (`400`), missing articles (`404`), and non-editable published articles (`409`) to one envelope.
+- **GET by id returns drafts** — intentional for this editorial sample; auth comes later. Collection listing stays published-only.
 - Defaults in Compose are for **local development only**, not production secrets.
