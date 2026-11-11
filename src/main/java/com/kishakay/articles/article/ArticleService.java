@@ -14,9 +14,11 @@ import org.springframework.transaction.annotation.Transactional;
 public class ArticleService {
 
     private final ArticleRepository articleRepository;
+    private final SummaryProvider summaryProvider;
 
-    public ArticleService(ArticleRepository articleRepository) {
+    public ArticleService(ArticleRepository articleRepository, SummaryProvider summaryProvider) {
         this.articleRepository = articleRepository;
+        this.summaryProvider = summaryProvider;
     }
 
     /**
@@ -94,6 +96,27 @@ public class ArticleService {
         // Flush so @PreUpdate updatedAt is present in the response body.
         Article saved = articleRepository.saveAndFlush(article);
         return ArticleResponse.from(saved);
+    }
+
+    /**
+     * Preview a summary for a {@link ArticleStatus#DRAFT} article only.
+     * Does <strong>not</strong> persist the summary or change article status/timestamps.
+     * <p>
+     * Intentionally <em>not</em> {@code @Transactional}: the repository read completes in its
+     * own short transaction before {@link SummaryProvider#summarize(String)} runs, so a slow
+     * or failing provider never holds a database transaction open.
+     */
+    public SummaryPreviewResponse previewSummary(UUID id) {
+        Article article = requireArticle(id);
+        if (article.getStatus() != ArticleStatus.DRAFT) {
+            throw new SummaryPreviewNotAllowedException(id, article.getStatus());
+        }
+
+        UUID articleId = article.getId();
+        String articleText = article.getTitle() + "\n\n" + article.getBody();
+
+        String summary = summaryProvider.summarize(articleText);
+        return new SummaryPreviewResponse(articleId, summary, summaryProvider.providerId());
     }
 
     private Article requireArticle(UUID id) {

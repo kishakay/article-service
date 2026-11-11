@@ -2,6 +2,11 @@ package com.kishakay.articles.article;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.nullValue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.doThrow;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -23,11 +28,12 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
 /**
- * Integration tests for article create / retrieve / publish / edit / list.
+ * Integration tests for article create / retrieve / publish / edit / list / summary-preview.
  * Requires a reachable PostgreSQL instance (e.g. {@code docker compose up -d}).
  */
 @SpringBootTest
@@ -46,9 +52,17 @@ class ArticleControllerTests {
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
+    /**
+     * Spy over the real stub so happy-path previews stay deterministic while
+     * missing/published/503 cases can assert invocation / force unavailable failures.
+     */
+    @MockitoSpyBean
+    private StubSummaryProvider summaryProvider;
+
     @BeforeEach
     void cleanArticles() {
         articleRepository.deleteAll();
+        reset(summaryProvider);
     }
 
     @Test
@@ -533,6 +547,94 @@ class ArticleControllerTests {
                 .andExpect(jsonPath("$.status").value(400))
                 .andExpect(jsonPath("$.message").value("Invalid pagination parameters"))
                 .andExpect(jsonPath("$.violations[0].field").value("size"));
+    }
+
+    @Test
+    void summaryPreview_returnsStubPreviewForDraft() throws Exception {
+        UUID id = createDraft("Preview me", "<p>draft body for preview</p>");
+
+        mockMvc.perform(post("/articles/{id}/summary-preview", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.articleId").value(id.toString()))
+                .andExpect(jsonPath("$.summary").value(StubSummaryProvider.SAMPLE_SUMMARY))
+                .andExpect(jsonPath("$.provider").value(StubSummaryProvider.PROVIDER_ID));
+
+        verify(summaryProvider).summarize(anyString());
+    }
+
+    @Test
+    void summaryPreview_doesNotChangePersistedArticle() throws Exception {
+        UUID id = createDraft("Leave me alone", "<p>unchanged body</p>");
+
+        Article before = articleRepository.findById(id).orElseThrow();
+        Instant originalCreatedAt = before.getCreatedAt();
+        Instant originalUpdatedAt = before.getUpdatedAt();
+        String originalTitle = before.getTitle();
+        String originalBody = before.getBody();
+
+        mockMvc.perform(post("/articles/{id}/summary-preview", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.provider").value("stub"));
+
+        Article after = articleRepository.findById(id).orElseThrow();
+        assertThat(after.getTitle()).isEqualTo(originalTitle);
+        assertThat(after.getBody()).isEqualTo(originalBody);
+        assertThat(after.getStatus()).isEqualTo(ArticleStatus.DRAFT);
+        assertThat(after.getCreatedAt()).isEqualTo(originalCreatedAt);
+        assertThat(after.getUpdatedAt()).isEqualTo(originalUpdatedAt);
+        assertThat(after.getPublishedAt()).isNull();
+
+        mockMvc.perform(get("/articles/{id}", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.title").value(originalTitle))
+                .andExpect(jsonPath("$.body").value(originalBody))
+                .andExpect(jsonPath("$.status").value("DRAFT"))
+                .andExpect(jsonPath("$.createdAt").value(originalCreatedAt.toString()))
+                .andExpect(jsonPath("$.updatedAt").value(originalUpdatedAt.toString()));
+    }
+
+    @Test
+    void summaryPreview_returns404ForMissingAndDoesNotInvokeProvider() throws Exception {
+        UUID missing = UUID.randomUUID();
+
+        mockMvc.perform(post("/articles/{id}/summary-preview", missing))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.message").value("Article not found"))
+                .andExpect(jsonPath("$.path").value("/articles/" + missing + "/summary-preview"));
+
+        verify(summaryProvider, never()).summarize(anyString());
+    }
+
+    @Test
+    void summaryPreview_returns409ForPublishedAndDoesNotInvokeProvider() throws Exception {
+        UUID id = createAndPublish("Already live", "<p>published</p>");
+
+        mockMvc.perform(post("/articles/{id}/summary-preview", id))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.status").value(409))
+                .andExpect(jsonPath("$.message").value("Summary preview is only available for draft articles"))
+                .andExpect(jsonPath("$.path").value("/articles/" + id + "/summary-preview"));
+
+        verify(summaryProvider, never()).summarize(anyString());
+    }
+
+    @Test
+    void summaryPreview_returns503WhenProviderUnavailable() throws Exception {
+        UUID id = createDraft("Provider down", "<p>still a draft</p>");
+
+        doThrow(new SummaryProviderUnavailableException("simulated outage"))
+                .when(summaryProvider).summarize(anyString());
+
+        mockMvc.perform(post("/articles/{id}/summary-preview", id))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.status").value(503))
+                .andExpect(jsonPath("$.message").value("Summary provider unavailable"))
+                .andExpect(jsonPath("$.path").value("/articles/" + id + "/summary-preview"));
+
+        Article persisted = articleRepository.findById(id).orElseThrow();
+        assertThat(persisted.getStatus()).isEqualTo(ArticleStatus.DRAFT);
+        assertThat(persisted.getTitle()).isEqualTo("Provider down");
     }
 
     private UUID createDraft(String title, String body) throws Exception {

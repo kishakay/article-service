@@ -4,7 +4,7 @@ Small Java / Spring Boot **Article Management API** interview code sample.
 
 ## Current stage
 
-**Stage 5 — paginated published listing**
+**Stage 6 — stub summary preview**
 
 - Spring Boot 3.4 / Java 21 / Maven
 - Docker Compose PostgreSQL + Flyway (`V1` baseline, `V2` articles table, `V3` `published_at`, `V4` published-list index)
@@ -14,8 +14,9 @@ Small Java / Spring Boot **Article Management API** interview code sample.
 - `GET /articles/{id}` returns the article (including drafts — see note below)
 - `POST /articles/{id}/publish` transitions **DRAFT → PUBLISHED** and stamps `publishedAt` once
 - `PUT /articles/{id}` replaces title and body on **DRAFT** articles only
+- `POST /articles/{id}/summary-preview` returns a **preview-only** stub summary for **DRAFT** articles
 
-Authentication, search/categories, optimistic locking, and summary generation are **not** implemented yet.
+Authentication, search/categories, optimistic locking, author review / saving of summaries, and real AI summarization are **not** implemented yet.
 
 ### Auth deferred — drafts are readable by id
 
@@ -40,13 +41,20 @@ Results are ordered by `publishedAt` descending, with `id` ascending as a determ
 
 **Limitations:** when new articles are published between requests, offsets shift. Page `1` after a publish can repeat or skip items that appeared on page `0` earlier. Cursor / keyset pagination (`publishedAt` + `id` seek) would be more stable under inserts; deferred here to keep Stage 5 focused.
 
+### Stub summary preview (not real summarisation)
+
+`POST /articles/{id}/summary-preview` is **DRAFT-only** and **does not save** anything. The wired `StubSummaryProvider` returns a fixed, clearly labelled sample string — it does **not** summarise the article content.
+
+A real provider can replace the stub by implementing `SummaryProvider` and registering that Spring bean instead (constructor-injected into `ArticleService`). Author review and persisting summaries are deferred to a later stage.
+
 ## Out of scope (documented)
 
 - Authentication / authorization (none; do not treat this API as secured)
 - Frontend / UI
 - Media uploads
 - Cloud deployment
-- Real AI summarization (a stub provider comes later)
+- Real AI summarization (stub provider only — no SDK, credentials, retries, caching, or async jobs)
+- Author review / saving of generated summaries
 - Microservices split
 - Search / categories / full-text filters
 - Revision / re-draft after publish
@@ -209,7 +217,37 @@ Notes:
 - No published rows → `200` with `"items": []`, `totalElements: 0`, `totalPages: 0`
 - `page < 0` or `size` outside 1–100 → `400` (`message: "Invalid pagination parameters"`, `violations[]`)
 
-### 8. Tests
+### 8. Preview a summary (draft only — stub)
+
+```bash
+curl -i -X POST http://localhost:8080/articles/<uuid>/summary-preview
+```
+
+Expected (DRAFT):
+
+- HTTP `200`
+- Body shape:
+
+```json
+{
+  "articleId": "<uuid>",
+  "summary": "[STUB SUMMARY] This is a sample preview. It does not summarise the article content.",
+  "provider": "stub"
+}
+```
+
+Important:
+
+- The stub **does not summarise** the article — the `summary` string is a fixed labelled sample
+- Nothing is persisted; article `status`, `updatedAt`, and content are unchanged
+- Author review and saving summaries are **deferred**
+- To swap in a real provider later: implement `SummaryProvider`, expose it as the Spring bean (instead of `StubSummaryProvider`), and keep the same endpoint/DTO
+
+**PUBLISHED** article → `409 Conflict` (`message: "Summary preview is only available for draft articles"`).  
+Unknown id → `404` (`message: "Article not found"`).  
+Provider unavailable (`SummaryProviderUnavailableException`) → `503` (`message: "Summary provider unavailable"`). Unexpected failures are **not** mapped to 503.
+
+### 9. Tests
 
 Requires a reachable Postgres (same Compose stack):
 
@@ -237,8 +275,8 @@ Schema is owned by **Flyway**. Hibernate `ddl-auto` is `validate` so the app fai
 └── src/main/
     ├── java/com/kishakay/articles/
     │   ├── ArticleServiceApplication.java
-    │   ├── api/          # shared error envelope (400 / 404 / 409)
-    │   └── article/      # feature package (entity, DTOs, service, controller)
+    │   ├── api/          # shared error envelope (400 / 404 / 409 / 503)
+    │   └── article/      # feature package (entity, DTOs, service, controller, SummaryProvider)
     └── resources/
         ├── application.yml
         └── db/migration/
@@ -256,6 +294,8 @@ Schema is owned by **Flyway**. Hibernate `ddl-auto` is `validate` so the app fai
 - **Publication rules on the domain** — `Article.publish()` is idempotent and stamps `publishedAt` once; the service owns the `@Transactional` boundary.
 - **Edit rules on the domain** — `Article.edit(...)` allows DRAFT only; published → conflict. Service owns the write transaction; `createdAt` is preserved and `updatedAt` is refreshed via `@PreUpdate`.
 - **Published listing in the database** — `findByStatus(PUBLISHED, pageable)` applies filter + `ORDER BY published_at DESC, id ASC` + limit/offset in SQL; partial index `idx_articles_published_list` supports the access path.
-- **Consistent errors** — `@RestControllerAdvice` maps validation / malformed UUIDs / bad pagination (`400`), missing articles (`404`), and non-editable published articles (`409`) to one envelope.
+- **Summary preview via replaceable port** — `SummaryProvider` is constructor-injected; `StubSummaryProvider` is the default bean. Preview loads the draft first, then calls the provider **outside** a service-level transaction (`open-in-view` is already `false`) so DB work finishes before summarisation. Typed `SummaryProviderUnavailableException` → `503` only; no catch-all.
+- **Preview is not a write** — no summary column, no status/timestamp mutation; author review / save deferred.
+- **Consistent errors** — `@RestControllerAdvice` maps validation / malformed UUIDs / bad pagination (`400`), missing articles (`404`), non-editable / non-previewable published articles (`409`), and expected provider unavailability (`503`) to one envelope.
 - **GET by id returns drafts** — intentional for this editorial sample; auth comes later. Collection listing stays published-only.
 - Defaults in Compose are for **local development only**, not production secrets.

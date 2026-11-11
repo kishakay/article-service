@@ -76,4 +76,13 @@ public class ArticleController {
     ) {
         return articleService.update(id, request);
     }
+
+    /**
+     * Returns a summary <em>preview</em> for a DRAFT article. Does not save the summary.
+     * Published articles → {@code 409}; missing → {@code 404}; provider unavailable → {@code 503}.
+     */
+    @PostMapping("/{id}/summary-preview")
+    public SummaryPreviewResponse previewSummary(@PathVariable UUID id) {
+        return articleService.previewSummary(id);
+    }
 }
