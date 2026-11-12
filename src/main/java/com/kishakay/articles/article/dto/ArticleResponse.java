@@ -1,5 +1,7 @@
-package com.kishakay.articles.article;
+package com.kishakay.articles.article.dto;
 
+import com.kishakay.articles.article.domain.Article;
+import com.kishakay.articles.article.domain.ArticleStatus;
 import java.time.Instant;
 import java.util.UUID;
 

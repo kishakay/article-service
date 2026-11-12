@@ -1,5 +1,6 @@
-package com.kishakay.articles.article;
+package com.kishakay.articles.article.exception;
 
+import com.kishakay.articles.article.domain.ArticleStatus;
 import java.util.UUID;
 
 /**

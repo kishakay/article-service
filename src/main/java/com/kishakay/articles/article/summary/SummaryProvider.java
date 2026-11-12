@@ -1,4 +1,6 @@
-package com.kishakay.articles.article;
+package com.kishakay.articles.article.summary;
+
+import com.kishakay.articles.article.exception.SummaryProviderUnavailableException;
 
 /**
  * Pluggable summarisation port. Stage 6 ships a deterministic stub;

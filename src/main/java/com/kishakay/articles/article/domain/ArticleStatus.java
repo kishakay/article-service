@@ -1,4 +1,4 @@
-package com.kishakay.articles.article;
+package com.kishakay.articles.article.domain;
 
 /**
  * Lifecycle status for an article.

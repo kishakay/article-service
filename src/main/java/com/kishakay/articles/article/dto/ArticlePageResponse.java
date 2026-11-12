@@ -1,4 +1,4 @@
-package com.kishakay.articles.article;
+package com.kishakay.articles.article.dto;
 
 import java.util.List;
 

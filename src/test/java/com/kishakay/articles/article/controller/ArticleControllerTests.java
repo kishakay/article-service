@@ -1,12 +1,12 @@
-package com.kishakay.articles.article;
+package com.kishakay.articles.article.controller;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.doThrow;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -16,6 +16,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.kishakay.articles.article.domain.Article;
+import com.kishakay.articles.article.domain.ArticleConstraints;
+import com.kishakay.articles.article.domain.ArticleStatus;
+import com.kishakay.articles.article.dto.CreateArticleRequest;
+import com.kishakay.articles.article.exception.SummaryProviderUnavailableException;
+import com.kishakay.articles.article.repository.ArticleRepository;
+import com.kishakay.articles.article.summary.StubSummaryProvider;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;

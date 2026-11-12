@@ -1,5 +1,7 @@
-package com.kishakay.articles.article;
+package com.kishakay.articles.article.repository;
 
+import com.kishakay.articles.article.domain.Article;
+import com.kishakay.articles.article.domain.ArticleStatus;
 import java.util.UUID;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;

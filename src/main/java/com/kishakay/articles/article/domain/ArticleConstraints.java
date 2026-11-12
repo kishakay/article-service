@@ -1,4 +1,4 @@
-package com.kishakay.articles.article;
+package com.kishakay.articles.article.domain;
 
 /**
  * Shared field limits for request validation and the JPA column mapping.
