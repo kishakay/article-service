@@ -15,6 +15,7 @@ Small Java / Spring Boot **Article Management API** interview code sample.
 - `POST /articles/{id}/publish` transitions **DRAFT → PUBLISHED** and stamps `publishedAt` once
 - `PUT /articles/{id}` replaces title and body on **DRAFT** articles only
 - `POST /articles/{id}/summary-preview` returns a **preview-only** stub summary for **DRAFT** articles
+- springdoc OpenAPI (`/v3/api-docs`) + Swagger UI (`/swagger-ui/index.html`)
 
 Authentication, search/categories, optimistic locking, author review / saving of summaries, and real AI summarization are **not** implemented yet.
 
@@ -99,7 +100,18 @@ mvn spring-boot:run
 
 On successful startup you should see Flyway apply `V1`–`V4`, then `Started ArticleServiceApplication`.
 
-### 3. Create a draft and capture its id
+### 3. OpenAPI / Swagger UI
+
+Once the app is running:
+
+| Resource | URL |
+|----------|-----|
+| OpenAPI JSON | http://localhost:8080/v3/api-docs |
+| Swagger UI | http://localhost:8080/swagger-ui/index.html |
+
+Documented with **springdoc-openapi** `2.8.8` (`springdoc-openapi-starter-webmvc-ui`).
+
+### 4. Create a draft and capture its id
 
 Inspect headers + body:
 
@@ -136,7 +148,7 @@ Validation rules:
 
 Invalid input returns `400 Bad Request` with a consistent error envelope (`message`, `violations[]`).
 
-### 4. Retrieve an article by id
+### 5. Retrieve an article by id
 
 ```bash
 curl -i "http://localhost:8080/articles/$ARTICLE_ID"
@@ -147,7 +159,7 @@ Expected: HTTP `200` with `ArticleResponse` (drafts included — auth deferred).
 Unknown id → `404` with the same error envelope (`message: "Article not found"`).  
 Malformed UUID → `400` (`message: "Malformed UUID"`).
 
-### 5. Edit a draft article
+### 6. Edit a draft article
 
 ```bash
 curl -i -X PUT "http://localhost:8080/articles/$ARTICLE_ID" \
@@ -171,7 +183,7 @@ Editing a **PUBLISHED** article → `409 Conflict` (`message: "Published article
 
 Unknown id → `404`. Malformed UUID → `400`.
 
-### 6. Preview a summary (draft only — stub)
+### 7. Preview a summary (draft only — stub)
 
 ```bash
 curl -i -X POST "http://localhost:8080/articles/$ARTICLE_ID/summary-preview"
@@ -201,7 +213,7 @@ Important:
 Unknown id → `404` (`message: "Article not found"`).  
 Provider unavailable (`SummaryProviderUnavailableException`) → `503` (`message: "Summary provider unavailable"`). Unexpected failures are **not** mapped to 503.
 
-### 7. Publish an article
+### 8. Publish an article
 
 ```bash
 curl -i -X POST "http://localhost:8080/articles/$ARTICLE_ID/publish"
@@ -222,7 +234,7 @@ curl -s -X POST "http://localhost:8080/articles/$ARTICLE_ID/publish" | jq -r --a
 
 Unknown id → `404`. Malformed UUID → `400`.
 
-### 8. List published articles
+### 9. List published articles
 
 ```bash
 # Defaults: page=0, size=20
@@ -261,7 +273,7 @@ Notes:
 - No published rows → `200` with `"items": []`, `totalElements: 0`, `totalPages: 0`
 - `page < 0` or `size` outside 1–100 → `400` (`message: "Invalid pagination parameters"`, `violations[]`)
 
-### 9. After publish: 409 on edit, 404 on unknown id
+### 10. After publish: 409 on edit, 404 on unknown id
 
 ```bash
 # 409 — published articles are immutable in this sample
@@ -275,7 +287,7 @@ curl -i http://localhost:8080/articles/00000000-0000-4000-8000-000000000000
 
 For the full scripted path in one block, see [`docs/interview-walkthrough.md`](docs/interview-walkthrough.md).
 
-### 10. Tests
+### 11. Tests
 
 Requires a reachable Postgres (same Compose stack):
 
@@ -305,7 +317,7 @@ Schema is owned by **Flyway**. Hibernate `ddl-auto` is `validate` so the app fai
 └── src/main/
     ├── java/com/kishakay/articles/
     │   ├── ArticleServiceApplication.java
-    │   ├── api/          # shared error envelope (400 / 404 / 409 / 503)
+    │   ├── api/          # shared error envelope + OpenAPI config (400 / 404 / 409 / 503)
     │   └── article/      # feature package (entity, DTOs, service, controller, SummaryProvider)
     └── resources/
         ├── application.yml
