@@ -9,6 +9,14 @@ public final class ArticleConstraints {
     public static final int TITLE_MAX_LENGTH = 200;
     public static final int BODY_MAX_LENGTH = 100_000;
 
+    /**
+     * Maximum length of the {@code Idempotency-Key} header for {@code POST /articles}.
+     */
+    public static final int IDEMPOTENCY_KEY_MAX_LENGTH = 128;
+
+    /** Idempotency operation scope for create-article. */
+    public static final String CREATE_ARTICLE_OPERATION = "CREATE_ARTICLE";
+
     /** Zero-based page index default for {@code GET /articles}. */
     public static final int PAGE_DEFAULT = 0;
 

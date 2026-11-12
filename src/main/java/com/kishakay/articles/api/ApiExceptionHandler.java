@@ -2,6 +2,9 @@ package com.kishakay.articles.api;
 
 import com.kishakay.articles.article.exception.ArticleNotEditableException;
 import com.kishakay.articles.article.exception.ArticleNotFoundException;
+import com.kishakay.articles.article.exception.ArticleVersionConflictException;
+import com.kishakay.articles.article.exception.IdempotencyKeyConflictException;
+import com.kishakay.articles.article.exception.InvalidIdempotencyKeyException;
 import com.kishakay.articles.article.exception.InvalidPaginationException;
 import com.kishakay.articles.article.exception.SummaryPreviewNotAllowedException;
 import com.kishakay.articles.article.exception.SummaryProviderUnavailableException;
@@ -9,6 +12,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -107,6 +111,57 @@ public class ApiExceptionHandler {
                 List.of()
         );
         return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
+    }
+
+    @ExceptionHandler({
+            ArticleVersionConflictException.class,
+            OptimisticLockingFailureException.class
+    })
+    public ResponseEntity<ApiError> handleVersionConflict(
+            RuntimeException ex,
+            HttpServletRequest request
+    ) {
+        ApiError body = new ApiError(
+                Instant.now(),
+                HttpStatus.CONFLICT.value(),
+                HttpStatus.CONFLICT.getReasonPhrase(),
+                "Article version conflict",
+                request.getRequestURI(),
+                List.of()
+        );
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
+    }
+
+    @ExceptionHandler(IdempotencyKeyConflictException.class)
+    public ResponseEntity<ApiError> handleIdempotencyConflict(
+            IdempotencyKeyConflictException ex,
+            HttpServletRequest request
+    ) {
+        ApiError body = new ApiError(
+                Instant.now(),
+                HttpStatus.CONFLICT.value(),
+                HttpStatus.CONFLICT.getReasonPhrase(),
+                "Idempotency key reused with a different payload",
+                request.getRequestURI(),
+                List.of()
+        );
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
+    }
+
+    @ExceptionHandler(InvalidIdempotencyKeyException.class)
+    public ResponseEntity<ApiError> handleInvalidIdempotencyKey(
+            InvalidIdempotencyKeyException ex,
+            HttpServletRequest request
+    ) {
+        ApiError body = new ApiError(
+                Instant.now(),
+                HttpStatus.BAD_REQUEST.value(),
+                HttpStatus.BAD_REQUEST.getReasonPhrase(),
+                "Invalid Idempotency-Key",
+                request.getRequestURI(),
+                List.of(new ApiError.FieldViolation("Idempotency-Key", ex.getDetail()))
+        );
+        return ResponseEntity.badRequest().body(body);
     }
 
     @ExceptionHandler(InvalidPaginationException.class)

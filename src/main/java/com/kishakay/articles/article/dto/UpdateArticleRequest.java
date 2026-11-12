@@ -3,13 +3,14 @@ package com.kishakay.articles.article.dto;
 import com.kishakay.articles.article.domain.ArticleConstraints;
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 
 /**
  * Request body for {@code PUT /articles/{id}}.
- * Only title and body are accepted; status, ids, and timestamps cannot be changed by the client.
+ * Title, body, and expectedVersion are accepted; status, ids, and timestamps cannot be changed by the client.
  */
-@Schema(name = "UpdateArticleRequest", description = "Replace title and body on a DRAFT article")
+@Schema(name = "UpdateArticleRequest", description = "Replace title and body on a DRAFT article with optimistic locking")
 public record UpdateArticleRequest(
         @NotBlank
         @Size(max = ArticleConstraints.TITLE_MAX_LENGTH)
@@ -19,6 +20,10 @@ public record UpdateArticleRequest(
         @NotBlank
         @Size(max = ArticleConstraints.BODY_MAX_LENGTH)
         @Schema(description = "Article body (HTML)", example = "<p>Updated paragraph</p>", maxLength = ArticleConstraints.BODY_MAX_LENGTH)
-        String body
+        String body,
+
+        @NotNull
+        @Schema(description = "Expected optimistic lock version from the last read", example = "0", requiredMode = Schema.RequiredMode.REQUIRED)
+        Long expectedVersion
 ) {
 }
