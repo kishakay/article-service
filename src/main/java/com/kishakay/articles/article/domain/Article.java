@@ -1,5 +1,6 @@
-package com.kishakay.articles.article;
+package com.kishakay.articles.article.domain;
 
+import com.kishakay.articles.article.exception.ArticleNotEditableException;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;

@@ -1,10 +1,10 @@
 package com.kishakay.articles.api;
 
-import com.kishakay.articles.article.ArticleNotEditableException;
-import com.kishakay.articles.article.ArticleNotFoundException;
-import com.kishakay.articles.article.InvalidPaginationException;
-import com.kishakay.articles.article.SummaryPreviewNotAllowedException;
-import com.kishakay.articles.article.SummaryProviderUnavailableException;
+import com.kishakay.articles.article.exception.ArticleNotEditableException;
+import com.kishakay.articles.article.exception.ArticleNotFoundException;
+import com.kishakay.articles.article.exception.InvalidPaginationException;
+import com.kishakay.articles.article.exception.SummaryPreviewNotAllowedException;
+import com.kishakay.articles.article.exception.SummaryProviderUnavailableException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Instant;
 import java.util.List;

@@ -1,4 +1,4 @@
-package com.kishakay.articles.article;
+package com.kishakay.articles.article.summary;
 
 import org.springframework.stereotype.Component;
 
@@ -9,10 +9,10 @@ import org.springframework.stereotype.Component;
 @Component
 public class StubSummaryProvider implements SummaryProvider {
 
-    static final String SAMPLE_SUMMARY =
+    public static final String SAMPLE_SUMMARY =
             "[STUB SUMMARY] This is a sample preview. It does not summarise the article content.";
 
-    static final String PROVIDER_ID = "stub";
+    public static final String PROVIDER_ID = "stub";
 
     @Override
     public String summarize(String articleText) {

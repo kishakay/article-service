@@ -1,5 +1,6 @@
-package com.kishakay.articles.article;
+package com.kishakay.articles.article.dto;
 
+import com.kishakay.articles.article.domain.ArticleConstraints;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 
