@@ -16,7 +16,8 @@ public class OpenApiConfig {
                         .description(
                                 "Interview code sample for creating, editing, publishing, "
                                         + "listing, and previewing stub summaries of articles. "
-                                        + "No authentication — drafts are readable by id."
+                                        + "POST /articles requires Idempotency-Key; PUT /articles/{id} "
+                                        + "requires expectedVersion. No authentication — drafts are readable by id."
                         )
                         .version("0.0.1"));
     }

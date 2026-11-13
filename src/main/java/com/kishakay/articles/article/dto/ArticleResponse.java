@@ -30,7 +30,10 @@ public record ArticleResponse(
         Instant updatedAt,
 
         @Schema(description = "First publish timestamp (UTC); null while DRAFT", example = "2026-01-15T12:00:00Z", nullable = true)
-        Instant publishedAt
+        Instant publishedAt,
+
+        @Schema(description = "Optimistic lock version; send as expectedVersion on edit", example = "0")
+        Long version
 ) {
 
     public static ArticleResponse from(Article article) {
@@ -41,7 +44,8 @@ public record ArticleResponse(
                 article.getStatus(),
                 article.getCreatedAt(),
                 article.getUpdatedAt(),
-                article.getPublishedAt()
+                article.getPublishedAt(),
+                article.getVersion()
         );
     }
 }

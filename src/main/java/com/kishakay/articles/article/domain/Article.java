@@ -9,6 +9,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.UUID;
@@ -48,6 +49,15 @@ public class Article {
      */
     @Column(name = "published_at")
     private Instant publishedAt;
+
+    /**
+     * Optimistic lock version. Incremented by Hibernate on each successful UPDATE.
+     * Clients must send {@code expectedVersion} on edit so stale reads are rejected
+     * even after the server reloads a fresh row.
+     */
+    @Version
+    @Column(nullable = false)
+    private Long version;
 
     protected Article() {
         // JPA
@@ -135,5 +145,9 @@ public class Article {
 
     public Instant getPublishedAt() {
         return publishedAt;
+    }
+
+    public Long getVersion() {
+        return version;
     }
 }

@@ -5,11 +5,13 @@ import com.kishakay.articles.article.domain.ArticleConstraints;
 import com.kishakay.articles.article.dto.ArticlePageResponse;
 import com.kishakay.articles.article.dto.ArticleResponse;
 import com.kishakay.articles.article.dto.CreateArticleRequest;
+import com.kishakay.articles.article.dto.CreateArticleResult;
 import com.kishakay.articles.article.dto.SummaryPreviewResponse;
 import com.kishakay.articles.article.dto.UpdateArticleRequest;
 import com.kishakay.articles.article.service.ArticleService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.enums.ParameterIn;
 import io.swagger.v3.oas.annotations.headers.Header;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
@@ -25,6 +27,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -42,28 +45,50 @@ public class ArticleController {
     }
 
     @PostMapping
-    @Operation(summary = "Create a draft article", description = "Always creates status DRAFT. Status is not accepted from the client.")
+    @Operation(
+            summary = "Create a draft article",
+            description = "Always creates status DRAFT. Requires a non-blank Idempotency-Key "
+                    + "(max " + ArticleConstraints.IDEMPOTENCY_KEY_MAX_LENGTH + " characters). "
+                    + "Same key + same payload replays the original 201; same key + different payload → 409."
+    )
     @ApiResponses({
             @ApiResponse(
                     responseCode = "201",
-                    description = "Draft created",
+                    description = "Draft created or idempotent replay of the original create",
                     headers = @Header(name = "Location", description = "URI of the created article", schema = @Schema(type = "string", format = "uri")),
                     content = @Content(schema = @Schema(implementation = ArticleResponse.class))
             ),
             @ApiResponse(
                     responseCode = "400",
-                    description = "Validation failed",
+                    description = "Validation failed or invalid Idempotency-Key",
+                    content = @Content(schema = @Schema(implementation = ApiError.class))
+            ),
+            @ApiResponse(
+                    responseCode = "409",
+                    description = "Idempotency-Key reused with a different payload",
                     content = @Content(schema = @Schema(implementation = ApiError.class))
             )
     })
-    public ResponseEntity<ArticleResponse> create(@Valid @RequestBody CreateArticleRequest request) {
-        ArticleResponse created = articleService.create(request);
+    public ResponseEntity<ArticleResponse> create(
+            @Parameter(
+                    name = "Idempotency-Key",
+                    in = ParameterIn.HEADER,
+                    required = true,
+                    description = "Client-supplied create key (max "
+                            + ArticleConstraints.IDEMPOTENCY_KEY_MAX_LENGTH
+                            + " chars). Scoped to create-article only.",
+                    example = "create-hello-draft-001"
+            )
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @Valid @RequestBody CreateArticleRequest request
+    ) {
+        CreateArticleResult created = articleService.create(idempotencyKey, request);
         URI location = ServletUriComponentsBuilder
-                .fromCurrentRequest()
-                .path("/{id}")
-                .buildAndExpand(created.id())
+                .fromCurrentContextPath()
+                .path(created.locationPath())
+                .build()
                 .toUri();
-        return ResponseEntity.created(location).body(created);
+        return ResponseEntity.created(location).body(created.body());
     }
 
     /**
@@ -130,12 +155,13 @@ public class ArticleController {
 
     /**
      * Publishes a draft. Already-published articles return 200 with the existing
-     * article (original {@code publishedAt} preserved).
+     * article (original {@code publishedAt} preserved). Concurrent writers may receive 409
+     * from optimistic locking.
      */
     @PostMapping("/{id}/publish")
     @Operation(
             summary = "Publish an article",
-            description = "Transitions DRAFT → PUBLISHED and stamps publishedAt once. Already-published articles return 200 with the original publishedAt preserved."
+            description = "Transitions DRAFT → PUBLISHED and stamps publishedAt once. Already-published articles return 200 with the original publishedAt preserved. Concurrent conflicting updates return 409."
     )
     @ApiResponses({
             @ApiResponse(
@@ -152,6 +178,11 @@ public class ArticleController {
                     responseCode = "404",
                     description = "Article not found",
                     content = @Content(schema = @Schema(implementation = ApiError.class))
+            ),
+            @ApiResponse(
+                    responseCode = "409",
+                    description = "Optimistic lock conflict",
+                    content = @Content(schema = @Schema(implementation = ApiError.class))
             )
     })
     public ArticleResponse publish(
@@ -163,11 +194,13 @@ public class ArticleController {
     /**
      * Replaces title and body on a DRAFT article.
      * Published articles return {@code 409 Conflict} (immutable in this sample).
+     * Stale {@code expectedVersion} also returns {@code 409}.
      */
     @PutMapping("/{id}")
     @Operation(
             summary = "Update a draft article",
-            description = "Replaces title and body on a DRAFT article. Published articles return 409 Conflict."
+            description = "Replaces title and body on a DRAFT article. Requires expectedVersion from the last read. "
+                    + "Published articles or stale/conflicting versions return 409 Conflict."
     )
     @ApiResponses({
             @ApiResponse(
@@ -187,7 +220,7 @@ public class ArticleController {
             ),
             @ApiResponse(
                     responseCode = "409",
-                    description = "Published articles cannot be edited",
+                    description = "Published articles cannot be edited, or article version conflict",
                     content = @Content(schema = @Schema(implementation = ApiError.class))
             )
     })

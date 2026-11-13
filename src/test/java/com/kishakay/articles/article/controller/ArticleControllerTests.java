@@ -23,16 +23,16 @@ import com.kishakay.articles.article.dto.CreateArticleRequest;
 import com.kishakay.articles.article.exception.SummaryProviderUnavailableException;
 import com.kishakay.articles.article.repository.ArticleRepository;
 import com.kishakay.articles.article.summary.StubSummaryProvider;
+import com.kishakay.articles.support.AbstractPostgresIntegrationTest;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
-import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
@@ -41,11 +41,11 @@ import org.springframework.test.web.servlet.MvcResult;
 
 /**
  * Integration tests for article create / retrieve / publish / edit / list / summary-preview.
- * Requires a reachable PostgreSQL instance (e.g. {@code docker compose up -d}).
+ * Uses Testcontainers PostgreSQL via {@link AbstractPostgresIntegrationTest}.
  */
-@SpringBootTest
-@AutoConfigureMockMvc
-class ArticleControllerTests {
+class ArticleControllerTests extends AbstractPostgresIntegrationTest {
+
+    private static final AtomicInteger KEY_SEQ = new AtomicInteger();
 
     @Autowired
     private MockMvc mockMvc;
@@ -69,6 +69,7 @@ class ArticleControllerTests {
     @BeforeEach
     void cleanArticles() {
         articleRepository.deleteAll();
+        jdbcTemplate.update("DELETE FROM idempotency_records");
         reset(summaryProvider);
     }
 
@@ -82,6 +83,7 @@ class ArticleControllerTests {
                 """;
 
         MvcResult result = mockMvc.perform(post("/articles")
+                        .header("Idempotency-Key", nextKey("create-hello"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(payload))
                 .andExpect(status().isCreated())
@@ -93,6 +95,7 @@ class ArticleControllerTests {
                 .andExpect(jsonPath("$.createdAt").isNotEmpty())
                 .andExpect(jsonPath("$.updatedAt").isNotEmpty())
                 .andExpect(jsonPath("$.publishedAt").value(nullValue()))
+                .andExpect(jsonPath("$.version").value(0))
                 .andReturn();
 
         JsonNode response = objectMapper.readTree(result.getResponse().getContentAsString());
@@ -105,6 +108,27 @@ class ArticleControllerTests {
         assertThat(persisted.getCreatedAt()).isNotNull();
         assertThat(persisted.getUpdatedAt()).isNotNull();
         assertThat(persisted.getPublishedAt()).isNull();
+        assertThat(persisted.getVersion()).isEqualTo(0L);
+    }
+
+    @Test
+    void createArticle_rejectsMissingIdempotencyKey() throws Exception {
+        String payload = """
+                {
+                  "title": "No key",
+                  "body": "<p>ok</p>"
+                }
+                """;
+
+        mockMvc.perform(post("/articles")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(payload))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message").value("Invalid Idempotency-Key"))
+                .andExpect(jsonPath("$.violations[0].field").value("Idempotency-Key"));
+
+        assertThat(articleRepository.count()).isZero();
     }
 
     @Test
@@ -117,6 +141,7 @@ class ArticleControllerTests {
                 """;
 
         mockMvc.perform(post("/articles")
+                        .header("Idempotency-Key", nextKey("blank-title"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(payload))
                 .andExpect(status().isBadRequest())
@@ -137,6 +162,7 @@ class ArticleControllerTests {
                 """;
 
         mockMvc.perform(post("/articles")
+                        .header("Idempotency-Key", nextKey("blank-body"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(payload))
                 .andExpect(status().isBadRequest())
@@ -156,6 +182,7 @@ class ArticleControllerTests {
                 """.formatted(tooLongTitle);
 
         mockMvc.perform(post("/articles")
+                        .header("Idempotency-Key", nextKey("long-title"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(payload))
                 .andExpect(status().isBadRequest())
@@ -172,6 +199,7 @@ class ArticleControllerTests {
         );
 
         mockMvc.perform(post("/articles")
+                        .header("Idempotency-Key", nextKey("long-body"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(payload))
                 .andExpect(status().isBadRequest())
@@ -190,7 +218,8 @@ class ArticleControllerTests {
                 .andExpect(jsonPath("$.title").value("Retrieve me"))
                 .andExpect(jsonPath("$.body").value("<p>body</p>"))
                 .andExpect(jsonPath("$.status").value("DRAFT"))
-                .andExpect(jsonPath("$.publishedAt").value(nullValue()));
+                .andExpect(jsonPath("$.publishedAt").value(nullValue()))
+                .andExpect(jsonPath("$.version").value(0));
     }
 
     @Test
@@ -222,6 +251,7 @@ class ArticleControllerTests {
                 .andExpect(jsonPath("$.id").value(id.toString()))
                 .andExpect(jsonPath("$.status").value("PUBLISHED"))
                 .andExpect(jsonPath("$.publishedAt").isNotEmpty())
+                .andExpect(jsonPath("$.version").value(1))
                 .andReturn();
 
         JsonNode response = objectMapper.readTree(result.getResponse().getContentAsString());
@@ -248,6 +278,7 @@ class ArticleControllerTests {
 
         JsonNode firstBody = objectMapper.readTree(first.getResponse().getContentAsString());
         String originalPublishedAt = firstBody.get("publishedAt").asText();
+        long versionAfterFirstPublish = firstBody.get("version").asLong();
 
         // Ensure clock would differ if we stamped again
         Thread.sleep(15);
@@ -255,10 +286,12 @@ class ArticleControllerTests {
         mockMvc.perform(post("/articles/{id}/publish", id))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("PUBLISHED"))
-                .andExpect(jsonPath("$.publishedAt").value(originalPublishedAt));
+                .andExpect(jsonPath("$.publishedAt").value(originalPublishedAt))
+                .andExpect(jsonPath("$.version").value(versionAfterFirstPublish));
 
         Article persisted = articleRepository.findById(id).orElseThrow();
         assertThat(persisted.getPublishedAt()).isEqualTo(Instant.parse(originalPublishedAt));
+        assertThat(persisted.getVersion()).isEqualTo(versionAfterFirstPublish);
     }
 
     @Test
@@ -286,6 +319,7 @@ class ArticleControllerTests {
         Article before = articleRepository.findById(id).orElseThrow();
         Instant originalCreatedAt = before.getCreatedAt();
         Instant originalUpdatedAt = before.getUpdatedAt();
+        long originalVersion = before.getVersion();
 
         // Ensure updatedAt will differ after edit
         Thread.sleep(15);
@@ -293,9 +327,10 @@ class ArticleControllerTests {
         String payload = """
                 {
                   "title": "Revised title",
-                  "body": "<p>revised</p>"
+                  "body": "<p>revised</p>",
+                  "expectedVersion": %d
                 }
-                """;
+                """.formatted(originalVersion);
 
         mockMvc.perform(put("/articles/{id}", id)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -306,7 +341,8 @@ class ArticleControllerTests {
                 .andExpect(jsonPath("$.body").value("<p>revised</p>"))
                 .andExpect(jsonPath("$.status").value("DRAFT"))
                 .andExpect(jsonPath("$.publishedAt").value(nullValue()))
-                .andExpect(jsonPath("$.createdAt").value(originalCreatedAt.toString()));
+                .andExpect(jsonPath("$.createdAt").value(originalCreatedAt.toString()))
+                .andExpect(jsonPath("$.version").value(originalVersion + 1));
 
         mockMvc.perform(get("/articles/{id}", id))
                 .andExpect(status().isOk())
@@ -322,6 +358,7 @@ class ArticleControllerTests {
         assertThat(persisted.getCreatedAt()).isEqualTo(originalCreatedAt);
         assertThat(persisted.getUpdatedAt()).isAfter(originalUpdatedAt);
         assertThat(persisted.getPublishedAt()).isNull();
+        assertThat(persisted.getVersion()).isEqualTo(originalVersion + 1);
     }
 
     @Test
@@ -330,13 +367,15 @@ class ArticleControllerTests {
 
         Article before = articleRepository.findById(id).orElseThrow();
         Instant originalUpdatedAt = before.getUpdatedAt();
+        long originalVersion = before.getVersion();
 
         String payload = """
                 {
                   "title": "   ",
-                  "body": "<p>should not save</p>"
+                  "body": "<p>should not save</p>",
+                  "expectedVersion": %d
                 }
-                """;
+                """.formatted(originalVersion);
 
         mockMvc.perform(put("/articles/{id}", id)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -351,11 +390,52 @@ class ArticleControllerTests {
         assertThat(persisted.getBody()).isEqualTo("<p>unchanged</p>");
         assertThat(persisted.getStatus()).isEqualTo(ArticleStatus.DRAFT);
         assertThat(persisted.getUpdatedAt()).isEqualTo(originalUpdatedAt);
+        assertThat(persisted.getVersion()).isEqualTo(originalVersion);
 
         mockMvc.perform(get("/articles/{id}", id))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.title").value("Keep me"))
                 .andExpect(jsonPath("$.body").value("<p>unchanged</p>"));
+    }
+
+    @Test
+    void editArticle_rejectsStaleExpectedVersionWithoutMutation() throws Exception {
+        UUID id = createDraft("Versioned", "<p>v0</p>");
+
+        mockMvc.perform(put("/articles/{id}", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "title": "First edit",
+                                  "body": "<p>v1</p>",
+                                  "expectedVersion": 0
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.version").value(1));
+
+        Article before = articleRepository.findById(id).orElseThrow();
+        Instant originalUpdatedAt = before.getUpdatedAt();
+
+        mockMvc.perform(put("/articles/{id}", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "title": "Stale rewrite",
+                                  "body": "<p>should not apply</p>",
+                                  "expectedVersion": 0
+                                }
+                                """))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.status").value(409))
+                .andExpect(jsonPath("$.message").value("Article version conflict"))
+                .andExpect(jsonPath("$.path").value("/articles/" + id));
+
+        Article persisted = articleRepository.findById(id).orElseThrow();
+        assertThat(persisted.getTitle()).isEqualTo("First edit");
+        assertThat(persisted.getBody()).isEqualTo("<p>v1</p>");
+        assertThat(persisted.getVersion()).isEqualTo(1L);
+        assertThat(persisted.getUpdatedAt()).isEqualTo(originalUpdatedAt);
     }
 
     @Test
@@ -369,13 +449,15 @@ class ArticleControllerTests {
         Article before = articleRepository.findById(id).orElseThrow();
         Instant originalUpdatedAt = before.getUpdatedAt();
         Instant originalPublishedAt = before.getPublishedAt();
+        long originalVersion = before.getVersion();
 
         String payload = """
                 {
                   "title": "Attempted rewrite",
-                  "body": "<p>should not apply</p>"
+                  "body": "<p>should not apply</p>",
+                  "expectedVersion": %d
                 }
-                """;
+                """.formatted(originalVersion);
 
         mockMvc.perform(put("/articles/{id}", id)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -391,6 +473,7 @@ class ArticleControllerTests {
         assertThat(persisted.getStatus()).isEqualTo(ArticleStatus.PUBLISHED);
         assertThat(persisted.getUpdatedAt()).isEqualTo(originalUpdatedAt);
         assertThat(persisted.getPublishedAt()).isEqualTo(originalPublishedAt);
+        assertThat(persisted.getVersion()).isEqualTo(originalVersion);
 
         mockMvc.perform(get("/articles/{id}", id))
                 .andExpect(status().isOk())
@@ -405,7 +488,8 @@ class ArticleControllerTests {
         String payload = """
                 {
                   "title": "Does not matter",
-                  "body": "<p>missing</p>"
+                  "body": "<p>missing</p>",
+                  "expectedVersion": 0
                 }
                 """;
 
@@ -578,6 +662,7 @@ class ArticleControllerTests {
         Instant originalUpdatedAt = before.getUpdatedAt();
         String originalTitle = before.getTitle();
         String originalBody = before.getBody();
+        long originalVersion = before.getVersion();
 
         mockMvc.perform(post("/articles/{id}/summary-preview", id))
                 .andExpect(status().isOk())
@@ -590,6 +675,7 @@ class ArticleControllerTests {
         assertThat(after.getCreatedAt()).isEqualTo(originalCreatedAt);
         assertThat(after.getUpdatedAt()).isEqualTo(originalUpdatedAt);
         assertThat(after.getPublishedAt()).isNull();
+        assertThat(after.getVersion()).isEqualTo(originalVersion);
 
         mockMvc.perform(get("/articles/{id}", id))
                 .andExpect(status().isOk())
@@ -647,6 +733,7 @@ class ArticleControllerTests {
     private UUID createDraft(String title, String body) throws Exception {
         String payload = objectMapper.writeValueAsString(new CreateArticleRequest(title, body));
         MvcResult result = mockMvc.perform(post("/articles")
+                        .header("Idempotency-Key", nextKey("draft"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(payload))
                 .andExpect(status().isCreated())
@@ -661,5 +748,9 @@ class ArticleControllerTests {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("PUBLISHED"));
         return id;
+    }
+
+    private static String nextKey(String prefix) {
+        return prefix + "-" + KEY_SEQ.incrementAndGet();
     }
 }
