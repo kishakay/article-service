@@ -85,7 +85,7 @@ Also out of scope: frontend / UI, microservices split, search / categories, post
 ## Prerequisites
 
 - Java 21+
-- Maven 3.9+ (3.8+ works)
+- Maven 3.9+ (3.8+ works), or use the committed Maven Wrapper (`./mvnw`)
 - Docker + Docker Compose (app runtime + Testcontainers for tests)
 - `curl` + `jq` (for the interview walkthrough script)
 
@@ -320,13 +320,24 @@ For the full scripted path in one block, see [`docs/interview-walkthrough.md`](d
 
 ### 11. Tests
 
-Integration tests use **Testcontainers** PostgreSQL (`postgres:16-alpine`). Docker must be available:
+Integration tests use **Testcontainers** PostgreSQL (`postgres:16-alpine`). Docker must be available (no external Compose DB required for tests):
 
 ```bash
-mvn test
+./mvnw test
+# or the same checks CI runs:
+./mvnw --batch-mode --no-transfer-progress verify
 ```
 
 Concurrency cases coordinate with barriers/latches (not sleeps) and cover idempotent replay, fingerprint conflicts, simultaneous same-key creates, rollback of article + key, stale `expectedVersion`, and competing edits.
+
+## Continuous Integration
+
+GitHub Actions (`.github/workflows/ci.yml`) runs on **pull requests** and **pushes to `main`**:
+
+- Ubuntu runner, Eclipse Temurin **Java 21**, Maven Wrapper with dependency caching
+- `./mvnw --batch-mode --no-transfer-progress verify` (compile, tests, package)
+- Integration tests start PostgreSQL via **Testcontainers** using the runner’s Docker (no CI Postgres service, no developer secrets)
+- Superseded runs on the same PR/branch are cancelled; Surefire/Failsafe reports upload on failure
 
 ## Configuration
 
@@ -342,7 +353,9 @@ Schema is owned by **Flyway**. Hibernate `ddl-auto` is `validate` so the app fai
 ## Project layout (so far)
 
 ```
+├── .github/workflows/ci.yml
 ├── docker-compose.yml
+├── mvnw / mvnw.cmd
 ├── pom.xml
 ├── README.md
 ├── docs/
