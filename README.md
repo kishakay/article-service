@@ -336,7 +336,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on **pull requests** and **push
 
 - Ubuntu runner, Eclipse Temurin **Java 21**, Maven Wrapper with dependency caching
 - `./mvnw --batch-mode --no-transfer-progress verify` (compile, tests, package)
-- Integration tests start PostgreSQL via **Testcontainers** using the runner’s Docker (no CI Postgres service, no developer secrets)
+- Integration tests start PostgreSQL via **Testcontainers** (`1.21.4+`) using the runner’s Docker (no CI Postgres service, no developer secrets)
 - Superseded runs on the same PR/branch are cancelled; Surefire/Failsafe reports upload on failure
 
 ## Configuration
