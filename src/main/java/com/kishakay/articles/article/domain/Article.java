@@ -12,6 +12,7 @@ import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.Objects;
 import java.util.UUID;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
@@ -49,6 +50,14 @@ public class Article {
      */
     @Column(name = "published_at")
     private Instant publishedAt;
+
+    /**
+     * Author-approved summary. Null until saved via {@link #saveApprovedSummary(String)}.
+     * Cleared when {@link #edit(String, String)} changes the body.
+     */
+    @JdbcTypeCode(SqlTypes.LONGVARCHAR)
+    @Column
+    private String summary;
 
     /**
      * Optimistic lock version. Incremented by Hibernate on each successful UPDATE.
@@ -96,6 +105,10 @@ public class Article {
     /**
      * Replaces editable content fields. Only {@link ArticleStatus#DRAFT} articles may be edited;
      * published articles are immutable in this sample (revision workflows deferred).
+     * <p>
+     * Clears a saved {@code summary} only when the body value actually changes so title-only
+     * or identical-body edits retain the approved text. Title/body/summary mutations share one
+     * flush and therefore one {@code @Version} increment.
      *
      * @throws ArticleNotEditableException if the article is not a draft
      */
@@ -103,8 +116,25 @@ public class Article {
         if (status != ArticleStatus.DRAFT) {
             throw new ArticleNotEditableException(id, status);
         }
+        boolean bodyChanged = !Objects.equals(body, newBody);
         title = newTitle;
         body = newBody;
+        if (bodyChanged) {
+            summary = null;
+        }
+    }
+
+    /**
+     * Persists an author-approved summary on a {@link ArticleStatus#DRAFT} article.
+     * Preview remains a separate, non-persisting flow.
+     *
+     * @throws ArticleNotEditableException if the article is not a draft
+     */
+    public void saveApprovedSummary(String approvedSummary) {
+        if (status != ArticleStatus.DRAFT) {
+            throw new ArticleNotEditableException(id, status);
+        }
+        summary = approvedSummary;
     }
 
     @PrePersist
@@ -145,6 +175,10 @@ public class Article {
 
     public Instant getPublishedAt() {
         return publishedAt;
+    }
+
+    public String getSummary() {
+        return summary;
     }
 
     public Long getVersion() {

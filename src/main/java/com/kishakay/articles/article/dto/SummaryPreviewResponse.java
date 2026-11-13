@@ -4,7 +4,8 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import java.util.UUID;
 
 /**
- * Preview-only summary payload. Not persisted; author review / save is deferred.
+ * Preview-only summary payload. Not persisted; author-approved save is
+ * {@code PUT /articles/{id}/summary}.
  */
 @Schema(name = "SummaryPreviewResponse", description = "Preview-only summary; not persisted")
 public record SummaryPreviewResponse(

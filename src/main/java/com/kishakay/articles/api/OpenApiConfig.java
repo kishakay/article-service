@@ -15,9 +15,10 @@ public class OpenApiConfig {
                         .title("Article Management API")
                         .description(
                                 "Interview code sample for creating, editing, publishing, "
-                                        + "listing, and previewing stub summaries of articles. "
-                                        + "POST /articles requires Idempotency-Key; PUT /articles/{id} "
-                                        + "requires expectedVersion. No authentication — drafts are readable by id."
+                                        + "listing, previewing stub summaries, and saving author-approved "
+                                        + "summaries of articles. POST /articles requires Idempotency-Key; "
+                                        + "PUT /articles/{id} and PUT /articles/{id}/summary require "
+                                        + "expectedVersion. No authentication — drafts are readable by id."
                         )
                         .version("0.0.1"));
     }

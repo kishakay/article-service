@@ -9,6 +9,9 @@ public final class ArticleConstraints {
     public static final int TITLE_MAX_LENGTH = 200;
     public static final int BODY_MAX_LENGTH = 100_000;
 
+    /** Maximum length of an author-approved article summary. */
+    public static final int SUMMARY_MAX_LENGTH = 2_000;
+
     /**
      * Maximum length of the {@code Idempotency-Key} header for {@code POST /articles}.
      */

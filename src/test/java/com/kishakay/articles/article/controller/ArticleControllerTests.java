@@ -40,7 +40,8 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
 /**
- * Integration tests for article create / retrieve / publish / edit / list / summary-preview.
+ * Integration tests for article create / retrieve / publish / edit / list /
+ * summary-preview / author-approved summary save.
  * Uses Testcontainers PostgreSQL via {@link AbstractPostgresIntegrationTest}.
  */
 class ArticleControllerTests extends AbstractPostgresIntegrationTest {
@@ -95,6 +96,7 @@ class ArticleControllerTests extends AbstractPostgresIntegrationTest {
                 .andExpect(jsonPath("$.createdAt").isNotEmpty())
                 .andExpect(jsonPath("$.updatedAt").isNotEmpty())
                 .andExpect(jsonPath("$.publishedAt").value(nullValue()))
+                .andExpect(jsonPath("$.summary").value(nullValue()))
                 .andExpect(jsonPath("$.version").value(0))
                 .andReturn();
 
@@ -108,6 +110,7 @@ class ArticleControllerTests extends AbstractPostgresIntegrationTest {
         assertThat(persisted.getCreatedAt()).isNotNull();
         assertThat(persisted.getUpdatedAt()).isNotNull();
         assertThat(persisted.getPublishedAt()).isNull();
+        assertThat(persisted.getSummary()).isNull();
         assertThat(persisted.getVersion()).isEqualTo(0L);
     }
 
@@ -675,6 +678,7 @@ class ArticleControllerTests extends AbstractPostgresIntegrationTest {
         assertThat(after.getCreatedAt()).isEqualTo(originalCreatedAt);
         assertThat(after.getUpdatedAt()).isEqualTo(originalUpdatedAt);
         assertThat(after.getPublishedAt()).isNull();
+        assertThat(after.getSummary()).isNull();
         assertThat(after.getVersion()).isEqualTo(originalVersion);
 
         mockMvc.perform(get("/articles/{id}", id))
@@ -682,8 +686,271 @@ class ArticleControllerTests extends AbstractPostgresIntegrationTest {
                 .andExpect(jsonPath("$.title").value(originalTitle))
                 .andExpect(jsonPath("$.body").value(originalBody))
                 .andExpect(jsonPath("$.status").value("DRAFT"))
+                .andExpect(jsonPath("$.summary").value(nullValue()))
                 .andExpect(jsonPath("$.createdAt").value(originalCreatedAt.toString()))
                 .andExpect(jsonPath("$.updatedAt").value(originalUpdatedAt.toString()));
+    }
+
+    @Test
+    void summaryPreview_doesNotClearSavedSummary() throws Exception {
+        UUID id = createDraft("Keep summary", "<p>body</p>");
+        saveApprovedSummary(id, 0L, "Approved text");
+
+        Article before = articleRepository.findById(id).orElseThrow();
+        Instant originalUpdatedAt = before.getUpdatedAt();
+        long originalVersion = before.getVersion();
+
+        mockMvc.perform(post("/articles/{id}/summary-preview", id))
+                .andExpect(status().isOk());
+
+        Article after = articleRepository.findById(id).orElseThrow();
+        assertThat(after.getSummary()).isEqualTo("Approved text");
+        assertThat(after.getUpdatedAt()).isEqualTo(originalUpdatedAt);
+        assertThat(after.getVersion()).isEqualTo(originalVersion);
+    }
+
+    @Test
+    void saveSummary_persistsAndIsReturnedOnGet() throws Exception {
+        UUID id = createDraft("Summarise me", "<p>body</p>");
+
+        Article before = articleRepository.findById(id).orElseThrow();
+        Instant originalCreatedAt = before.getCreatedAt();
+        Instant originalUpdatedAt = before.getUpdatedAt();
+        long originalVersion = before.getVersion();
+
+        Thread.sleep(15);
+
+        mockMvc.perform(put("/articles/{id}/summary", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "summary": "Reviewed summary text",
+                                  "expectedVersion": %d
+                                }
+                                """.formatted(originalVersion)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(id.toString()))
+                .andExpect(jsonPath("$.summary").value("Reviewed summary text"))
+                .andExpect(jsonPath("$.status").value("DRAFT"))
+                .andExpect(jsonPath("$.version").value(originalVersion + 1))
+                .andExpect(jsonPath("$.createdAt").value(originalCreatedAt.toString()));
+
+        mockMvc.perform(get("/articles/{id}", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.summary").value("Reviewed summary text"))
+                .andExpect(jsonPath("$.version").value(originalVersion + 1));
+
+        Article persisted = articleRepository.findById(id).orElseThrow();
+        assertThat(persisted.getSummary()).isEqualTo("Reviewed summary text");
+        assertThat(persisted.getUpdatedAt()).isAfter(originalUpdatedAt);
+        assertThat(persisted.getVersion()).isEqualTo(originalVersion + 1);
+    }
+
+    @Test
+    void saveSummary_rejectsBlankAndOverlongWithoutMutation() throws Exception {
+        UUID id = createDraft("Validate summary", "<p>body</p>");
+        Article before = articleRepository.findById(id).orElseThrow();
+        Instant originalUpdatedAt = before.getUpdatedAt();
+        long originalVersion = before.getVersion();
+
+        mockMvc.perform(put("/articles/{id}/summary", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "summary": "   ",
+                                  "expectedVersion": %d
+                                }
+                                """.formatted(originalVersion)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message").value("Validation failed"))
+                .andExpect(jsonPath("$.violations[0].field").value("summary"));
+
+        String tooLong = "x".repeat(ArticleConstraints.SUMMARY_MAX_LENGTH + 1);
+        mockMvc.perform(put("/articles/{id}/summary", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "summary": "%s",
+                                  "expectedVersion": %d
+                                }
+                                """.formatted(tooLong, originalVersion)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message").value("Validation failed"))
+                .andExpect(jsonPath("$.violations[0].field").value("summary"));
+
+        Article persisted = articleRepository.findById(id).orElseThrow();
+        assertThat(persisted.getSummary()).isNull();
+        assertThat(persisted.getUpdatedAt()).isEqualTo(originalUpdatedAt);
+        assertThat(persisted.getVersion()).isEqualTo(originalVersion);
+    }
+
+    @Test
+    void saveSummary_rejectsMissingExpectedVersion() throws Exception {
+        UUID id = createDraft("Need version", "<p>body</p>");
+
+        mockMvc.perform(put("/articles/{id}/summary", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "summary": "No version field"
+                                }
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message").value("Validation failed"))
+                .andExpect(jsonPath("$.violations[0].field").value("expectedVersion"));
+    }
+
+    @Test
+    void saveSummary_rejectsStaleExpectedVersionWithoutMutation() throws Exception {
+        UUID id = createDraft("Stale summary", "<p>body</p>");
+        saveApprovedSummary(id, 0L, "First approved");
+
+        Article before = articleRepository.findById(id).orElseThrow();
+        Instant originalUpdatedAt = before.getUpdatedAt();
+
+        mockMvc.perform(put("/articles/{id}/summary", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "summary": "Should not apply",
+                                  "expectedVersion": 0
+                                }
+                                """))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.status").value(409))
+                .andExpect(jsonPath("$.message").value("Article version conflict"))
+                .andExpect(jsonPath("$.path").value("/articles/" + id + "/summary"));
+
+        Article persisted = articleRepository.findById(id).orElseThrow();
+        assertThat(persisted.getSummary()).isEqualTo("First approved");
+        assertThat(persisted.getVersion()).isEqualTo(1L);
+        assertThat(persisted.getUpdatedAt()).isEqualTo(originalUpdatedAt);
+    }
+
+    @Test
+    void saveSummary_rejectsPublishedWithoutChangingIt() throws Exception {
+        UUID id = createAndPublish("Published summary lock", "<p>final</p>");
+        Article before = articleRepository.findById(id).orElseThrow();
+        Instant originalUpdatedAt = before.getUpdatedAt();
+        long originalVersion = before.getVersion();
+
+        mockMvc.perform(put("/articles/{id}/summary", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "summary": "Should not save",
+                                  "expectedVersion": %d
+                                }
+                                """.formatted(originalVersion)))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.status").value(409))
+                .andExpect(jsonPath("$.message").value("Published articles cannot be edited"))
+                .andExpect(jsonPath("$.path").value("/articles/" + id + "/summary"));
+
+        Article persisted = articleRepository.findById(id).orElseThrow();
+        assertThat(persisted.getSummary()).isNull();
+        assertThat(persisted.getUpdatedAt()).isEqualTo(originalUpdatedAt);
+        assertThat(persisted.getVersion()).isEqualTo(originalVersion);
+    }
+
+    @Test
+    void saveSummary_returns404ForUnknownId() throws Exception {
+        UUID missing = UUID.randomUUID();
+
+        mockMvc.perform(put("/articles/{id}/summary", missing)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "summary": "Does not matter",
+                                  "expectedVersion": 0
+                                }
+                                """))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.message").value("Article not found"))
+                .andExpect(jsonPath("$.path").value("/articles/" + missing + "/summary"));
+    }
+
+    @Test
+    void editArticle_clearsSummaryWhenBodyChangesWithSingleVersionIncrement() throws Exception {
+        UUID id = createDraft("Clear on body", "<p>original</p>");
+        saveApprovedSummary(id, 0L, "Will be cleared");
+
+        Article before = articleRepository.findById(id).orElseThrow();
+        assertThat(before.getSummary()).isEqualTo("Will be cleared");
+        assertThat(before.getVersion()).isEqualTo(1L);
+        Instant originalUpdatedAt = before.getUpdatedAt();
+
+        Thread.sleep(15);
+
+        mockMvc.perform(put("/articles/{id}", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "title": "Clear on body",
+                                  "body": "<p>changed body</p>",
+                                  "expectedVersion": 1
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.summary").value(nullValue()))
+                .andExpect(jsonPath("$.body").value("<p>changed body</p>"))
+                .andExpect(jsonPath("$.version").value(2));
+
+        Article persisted = articleRepository.findById(id).orElseThrow();
+        assertThat(persisted.getSummary()).isNull();
+        assertThat(persisted.getBody()).isEqualTo("<p>changed body</p>");
+        assertThat(persisted.getVersion()).isEqualTo(2L);
+        assertThat(persisted.getUpdatedAt()).isAfter(originalUpdatedAt);
+    }
+
+    @Test
+    void editArticle_retainsSummaryOnTitleOnlyEdit() throws Exception {
+        UUID id = createDraft("Old title", "<p>same body</p>");
+        saveApprovedSummary(id, 0L, "Keep me");
+
+        mockMvc.perform(put("/articles/{id}", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "title": "New title",
+                                  "body": "<p>same body</p>",
+                                  "expectedVersion": 1
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.title").value("New title"))
+                .andExpect(jsonPath("$.summary").value("Keep me"))
+                .andExpect(jsonPath("$.version").value(2));
+
+        Article persisted = articleRepository.findById(id).orElseThrow();
+        assertThat(persisted.getSummary()).isEqualTo("Keep me");
+        assertThat(persisted.getTitle()).isEqualTo("New title");
+        assertThat(persisted.getVersion()).isEqualTo(2L);
+    }
+
+    @Test
+    void editArticle_retainsSummaryWhenBodyUnchanged() throws Exception {
+        UUID id = createDraft("Same title", "<p>unchanged body</p>");
+        saveApprovedSummary(id, 0L, "Still valid");
+
+        mockMvc.perform(put("/articles/{id}", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "title": "Same title",
+                                  "body": "<p>unchanged body</p>",
+                                  "expectedVersion": 1
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.summary").value("Still valid"));
+
+        Article persisted = articleRepository.findById(id).orElseThrow();
+        assertThat(persisted.getSummary()).isEqualTo("Still valid");
     }
 
     @Test
@@ -748,6 +1015,19 @@ class ArticleControllerTests extends AbstractPostgresIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("PUBLISHED"));
         return id;
+    }
+
+    private void saveApprovedSummary(UUID id, long expectedVersion, String summary) throws Exception {
+        mockMvc.perform(put("/articles/{id}/summary", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "summary": %s,
+                                  "expectedVersion": %d
+                                }
+                                """.formatted(objectMapper.writeValueAsString(summary), expectedVersion)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.summary").value(summary));
     }
 
     private static String nextKey(String prefix) {
