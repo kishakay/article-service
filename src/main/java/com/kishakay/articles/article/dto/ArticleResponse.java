@@ -8,6 +8,10 @@ import java.util.UUID;
 
 /**
  * API representation of an article. Controllers return this DTO — never the JPA entity.
+ *
+ * <p>{@code summary} is null until the author saves an approved summary and is cleared when a
+ * draft body edit changes the body. Missing {@code summary} in stored idempotency snapshots
+ * deserialises as null so pre-field response JSON still replays.
  */
 @Schema(name = "ArticleResponse", description = "Full article representation")
 public record ArticleResponse(
@@ -32,7 +36,14 @@ public record ArticleResponse(
         @Schema(description = "First publish timestamp (UTC); null while DRAFT", example = "2026-01-15T12:00:00Z", nullable = true)
         Instant publishedAt,
 
-        @Schema(description = "Optimistic lock version; send as expectedVersion on edit", example = "0")
+        @Schema(
+                description = "Author-approved summary; null until saved; cleared when draft body changes",
+                example = "Reviewed summary text",
+                nullable = true
+        )
+        String summary,
+
+        @Schema(description = "Optimistic lock version; send as expectedVersion on edit or summary save", example = "0")
         Long version
 ) {
 
@@ -45,6 +56,7 @@ public record ArticleResponse(
                 article.getCreatedAt(),
                 article.getUpdatedAt(),
                 article.getPublishedAt(),
+                article.getSummary(),
                 article.getVersion()
         );
     }

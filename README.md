@@ -4,22 +4,23 @@ Small Java / Spring Boot **Article Management API** interview code sample.
 
 ## Current stage
 
-**Stage 7 — optimistic locking + idempotent create**
+**Stage 8 — author-approved summary save + body-change invalidation**
 
 - Spring Boot 3.4 / Java 21 / Maven
-- Docker Compose PostgreSQL + Flyway (`V1`–`V6`: articles, `published_at`, list index, `version`, idempotency records)
+- Docker Compose PostgreSQL + Flyway (`V1`–`V7`: articles, `published_at`, list index, `version`, idempotency records, nullable `summary`)
 - Hibernate `ddl-auto: validate` (schema owned by Flyway)
 - `POST /articles` creates a **DRAFT** article (`201` + `Location`) and **requires** `Idempotency-Key`
 - `GET /articles` returns **PUBLISHED** articles only (offset pagination)
-- `GET /articles/{id}` returns the article (including drafts — see note below)
+- `GET /articles/{id}` returns the article (including drafts — see note below), including nullable `summary`
 - `POST /articles/{id}/publish` transitions **DRAFT → PUBLISHED** and stamps `publishedAt` once
-- `PUT /articles/{id}` replaces title and body on **DRAFT** articles only and **requires** `expectedVersion`
-- `POST /articles/{id}/summary-preview` returns a **preview-only** stub summary for **DRAFT** articles
+- `PUT /articles/{id}` replaces title and body on **DRAFT** articles only and **requires** `expectedVersion`; clears saved `summary` only when the body actually changes
+- `POST /articles/{id}/summary-preview` returns a **preview-only** stub summary for **DRAFT** articles (does not save)
+- `PUT /articles/{id}/summary` saves an **author-approved** summary on **DRAFT** articles (`expectedVersion` required)
 - springdoc OpenAPI (`/v3/api-docs`) + Swagger UI (`/swagger-ui/index.html`)
 
-Authentication, search/categories, author review / saving of summaries, and real AI summarization are **not** implemented yet.
+Authentication, search/categories, and real AI summarization are **not** implemented yet.
 
-**Interview demo:** the **canonical** runnable script is [`docs/interview-walkthrough.md`](docs/interview-walkthrough.md) (idempotent create → edit with version → stub summary → publish → republish → list → published-immutability `409` → `404`), plus design trade-offs and known limitations.
+**Interview demo:** the **canonical** runnable script is [`docs/interview-walkthrough.md`](docs/interview-walkthrough.md) (idempotent create → edit with version → stub preview → save approved summary → publish → republish → list → published-immutability `409` → `404`), plus design trade-offs and known limitations.
 
 ### Auth deferred — drafts are readable by id
 
@@ -27,13 +28,13 @@ Authentication, search/categories, author review / saving of summaries, and real
 
 ### Published articles are immutable (this sample)
 
-Once published, an article cannot be edited via `PUT /articles/{id}` — the API returns `409 Conflict`. Revision workflows (new draft versions after publish) are deferred. Concurrent writers are protected with optimistic locking (see below).
+Once published, an article cannot be edited via `PUT /articles/{id}` or `PUT /articles/{id}/summary` — the API returns `409 Conflict`. Revision workflows (new draft versions after publish) are deferred. Concurrent writers are protected with optimistic locking (see below).
 
 ### Optimistic locking
 
 Every article carries a JPA `@Version` field (`version` in `ArticleResponse`, starting at `0`).
 
-- **Edit (`PUT /articles/{id}`)** requires `expectedVersion` in the body. The service compares it to the loaded entity **before** mutating. This matters because `@Version` alone does not reject a client that submits an old edit after the server reloads fresh data. Hibernate’s version check still detects races between load and commit.
+- **Edit (`PUT /articles/{id}`)** and **save summary (`PUT /articles/{id}/summary`)** require `expectedVersion` in the body. The service compares it to the loaded entity **before** mutating. This matters because `@Version` alone does not reject a client that submits an old edit after the server reloads fresh data. Hibernate’s version check still detects races between load and commit.
 - **Publish** is also covered by the entity `@Version` on flush (concurrent conflicting writers → `409`). Repeat publish of an already-published article remains a no-op and **preserves** the original `publishedAt` (no dirty update → version unchanged).
 - Stale `expectedVersion` or Hibernate optimistic-lock failures return the shared `409` envelope with `message: "Article version conflict"`.
 
@@ -68,16 +69,22 @@ Results are ordered by `publishedAt` descending, with `id` ascending as a determ
 
 ### Stub summary preview (not real summarisation)
 
-`POST /articles/{id}/summary-preview` is **DRAFT-only** and **does not save** anything. The wired `StubSummaryProvider` returns a fixed, clearly labelled sample string — it does **not** summarise the article content.
+`POST /articles/{id}/summary-preview` is **DRAFT-only** and **does not save** anything. The wired `StubSummaryProvider` returns a fixed, clearly labelled sample string — it does **not** summarise the article content. Preview does not change `summary`, `updatedAt`, or `version`.
 
-A real provider can replace the stub by implementing `SummaryProvider` and registering that Spring bean instead (constructor-injected into `ArticleService`). Author review and persisting summaries are deferred to a later stage.
+A real provider can replace the stub by implementing `SummaryProvider` and registering that Spring bean instead (constructor-injected into `ArticleService`).
+
+### Author-approved summary
+
+`PUT /articles/{id}/summary` persists a reviewed summary on a **DRAFT** (non-blank, max **2,000** characters; `expectedVersion` required). Saving updates `updatedAt` and increments `version`. Published articles → `409`.
+
+Draft **body** edits clear a saved summary in the same transaction (one version increment for the combined change). Title-only edits or an unchanged body retain the summary. Summary is **not** accepted on the edit request.
 
 ## Known limitations
 
 - **No authentication or authorisation** — do not treat this API as secured; idempotency keys are not client-scoped.
 - **Individual retrieval exposes drafts** — `GET /articles/{id}` returns DRAFT articles; only `GET /articles` is published-only.
 - **Idempotency keys retained forever** — sample behaviour only; production needs TTL/retention and auth-scoped namespaces.
-- **Stub summary provider only** — labelled sample string; no real AI, persistence, or author-review save flow.
+- **Stub summary provider only** — labelled sample string; no real AI summarisation.
 - **No real media handling or cloud deployment** — no uploads/object storage; Compose credentials are local-dev defaults.
 
 Also out of scope: frontend / UI, microservices split, search / categories, post-publish revisions, cursor / keyset pagination.
@@ -122,7 +129,7 @@ export DB_PASSWORD=articles
 ./mvnw spring-boot:run
 ```
 
-On successful startup you should see Flyway apply `V1`–`V6`, then `Started ArticleServiceApplication`.
+On successful startup you should see Flyway apply `V1`–`V7`, then `Started ArticleServiceApplication`.
 
 ### 3. OpenAPI / Swagger UI
 
@@ -207,7 +214,8 @@ Expected:
 - HTTP `200`
 - Updated `title` / `body`, still `status: "DRAFT"`
 - `createdAt` unchanged; `updatedAt` refreshed; `version` incremented
-- Clients cannot change `status`, ids, or timestamps through this request
+- Saved `summary` is cleared **only** when `body` actually changes; title-only or identical-body edits retain it (one version bump for the combined edit)
+- Clients cannot change `status`, ids, timestamps, or `summary` through this request
 
 Same validation rules as create for title/body; `expectedVersion` is required. Invalid input → `400` and the article is left unchanged.
 
@@ -237,15 +245,44 @@ Expected (DRAFT):
 Important:
 
 - The stub **does not summarise** the article — the `summary` string is a fixed labelled sample
-- Nothing is persisted; article `status`, `updatedAt`, `version`, and content are unchanged
-- Author review and saving summaries are **deferred**
+- Nothing is persisted; article `status`, `updatedAt`, `version`, content, and saved `summary` are unchanged
 - To swap in a real provider later: implement `SummaryProvider`, expose it as the Spring bean (instead of `StubSummaryProvider`), and keep the same endpoint/DTO
 
 **PUBLISHED** article → `409 Conflict` (`message: "Summary preview is only available for draft articles"`).  
 Unknown id → `404` (`message: "Article not found"`).  
 Provider unavailable (`SummaryProviderUnavailableException`) → `503` (`message: "Summary provider unavailable"`). Unexpected failures are **not** mapped to 503.
 
-### 8. Publish an article
+### 8. Save an author-approved summary (draft only)
+
+```bash
+curl -i -X PUT "http://localhost:8080/articles/$ARTICLE_ID/summary" \
+  -H 'Content-Type: application/json' \
+  -d "{
+    \"summary\": \"Reviewed summary text\",
+    \"expectedVersion\": $VERSION
+  }"
+```
+
+Expected:
+
+- HTTP `200` with updated `ArticleResponse` (`summary` set)
+- `updatedAt` refreshed; `version` incremented
+- Non-blank; max **2,000** characters; `expectedVersion` required
+
+Blank/overlong/`expectedVersion` missing → `400`.  
+Stale `expectedVersion` → `409` (`Article version conflict`).  
+**PUBLISHED** → `409` (`Published articles cannot be edited`).  
+Unknown id → `404`.
+
+Capture the new version before publish:
+
+```bash
+VERSION=$(curl -s -X PUT "http://localhost:8080/articles/$ARTICLE_ID/summary" \
+  -H 'Content-Type: application/json' \
+  -d "{\"summary\":\"Reviewed summary text\",\"expectedVersion\":$VERSION}" | jq -r '.version')
+```
+
+### 9. Publish an article
 
 ```bash
 curl -i -X POST "http://localhost:8080/articles/$ARTICLE_ID/publish"
@@ -267,11 +304,11 @@ VERSION=$(echo "$PUBLISH" | jq -r '.version')
 curl -s -X POST "http://localhost:8080/articles/$ARTICLE_ID/publish" | jq -r --arg p "$PUBLISHED_AT" 'select(.publishedAt == $p) | .publishedAt'
 ```
 
-After the create → edit → publish path above, `version` is typically `2` on first publish (create `0`, edit `1`, publish `2`). Republish keeps that version.
+After the create → edit → save summary → publish path above, `version` is typically `3` on first publish (create `0`, edit `1`, save summary `2`, publish `3`). Republish keeps that version.
 
 Unknown id → `404`. Malformed UUID → `400`. Concurrent optimistic-lock conflicts → `409`.
 
-### 9. List published articles
+### 10. List published articles
 
 ```bash
 # Defaults: page=0, size=20
@@ -310,7 +347,7 @@ Notes:
 - No published rows → `200` with `"items": []`, `totalElements: 0`, `totalPages: 0`
 - `page < 0` or `size` outside 1–100 → `400` (`message: "Invalid pagination parameters"`, `violations[]`)
 
-### 10. After publish: 409 on edit, 404 on unknown id
+### 11. After publish: 409 on edit, 404 on unknown id
 
 ```bash
 # 409 — published immutability (use the version from publish, not a stale 0)
@@ -326,7 +363,7 @@ Use `$VERSION` from the publish response so the service reaches the published-im
 
 For the full scripted path in one block, see [`docs/interview-walkthrough.md`](docs/interview-walkthrough.md) (canonical walkthrough).
 
-### 11. Tests
+### 12. Tests
 
 Integration tests use **Testcontainers** PostgreSQL (`postgres:16-alpine`) — a fresh container per suite, not the Compose app database. Docker must be available:
 
@@ -382,7 +419,8 @@ Schema is owned by **Flyway**. Hibernate `ddl-auto` is `validate` so the app fai
             ├── V3__add_published_at.sql
             ├── V4__index_published_articles_list.sql
             ├── V5__add_article_version.sql
-            └── V6__create_idempotency_records.sql
+            ├── V6__create_idempotency_records.sql
+            └── V7__add_article_summary.sql
 ```
 
 ## Design notes
@@ -392,13 +430,13 @@ Short list below; trade-offs are expanded in [`docs/interview-walkthrough.md`](d
 - **Flyway owns schema; Hibernate validates** — migrations authoritative; startup fails on mapping drift (no Hibernate auto-evolve).
 - **DTO boundary** — controllers expose response DTOs, never the JPA entity. Listing uses a slim item DTO without HTML body.
 - **Creation always DRAFT** — status is set in the domain factory, not accepted from the client.
-- **Idempotent create** — claim key with `ON CONFLICT DO NOTHING`, fingerprint payload, store completed `201` in the same TX; replay or `409` for conflicts.
-- **Optimistic locking** — `@Version` on `Article`; edit requires `expectedVersion`; publish participates via Hibernate version checks; stale/conflict → shared `409`.
+- **Idempotent create** — claim key with `ON CONFLICT DO NOTHING`, fingerprint payload, store completed `201` in the same TX; replay or `409` for conflicts. Missing `summary` in older stored snapshots deserialises as null.
+- **Optimistic locking** — `@Version` on `Article`; edit and summary save require `expectedVersion`; publish participates via Hibernate version checks; stale/conflict → shared `409`.
 - **Publication rules on the domain** — `Article.publish()` is idempotent and stamps `publishedAt` once; the service owns the `@Transactional` boundary.
-- **Edit rules on the domain** — `Article.edit(...)` allows DRAFT only; published → `409` (not an idempotent no-op). Service owns the write transaction; `createdAt` preserved, `updatedAt` via `@PreUpdate`.
+- **Edit rules on the domain** — `Article.edit(...)` allows DRAFT only; published → `409` (not an idempotent no-op). Clears saved `summary` only when body changes; one flush / one version bump. Service owns the write transaction; `createdAt` preserved, `updatedAt` via `@PreUpdate`.
 - **Published listing in the database** — `findByStatus(PUBLISHED, pageable)` applies filter + `ORDER BY published_at DESC, id ASC` + limit/offset in SQL; partial index `idx_articles_published_list` supports the access path. Offset is simple for demos; keyset would be stabler under inserts.
 - **Summary preview via replaceable port** — `SummaryProvider` is constructor-injected; `StubSummaryProvider` is the default bean. `previewSummary` is not service-`@Transactional`: the repository `findById` completes in its own short TX, then the provider runs (`open-in-view` is already `false`). Typed `SummaryProviderUnavailableException` → `503` only; no catch-all.
-- **Preview is not a write** — no summary column, no status/timestamp/version mutation; author review / save deferred.
+- **Preview is not a write** — suggestion only; no status/timestamp/version/summary mutation. Author-approved persistence is `PUT /articles/{id}/summary` via `Article.saveApprovedSummary`.
 - **Consistent errors** — `@RestControllerAdvice` maps validation / bad keys / malformed UUIDs / bad pagination (`400`), missing articles (`404`), non-editable / version / idempotency conflicts (`409`), and expected provider unavailability (`503`) to one envelope.
 - **GET by id returns drafts** — intentional for this editorial sample; auth comes later. Collection listing stays published-only.
 - Defaults in Compose are for **local development only**, not production secrets.

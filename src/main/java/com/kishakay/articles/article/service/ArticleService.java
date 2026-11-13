@@ -10,6 +10,7 @@ import com.kishakay.articles.article.dto.ArticlePageResponse;
 import com.kishakay.articles.article.dto.ArticleResponse;
 import com.kishakay.articles.article.dto.CreateArticleRequest;
 import com.kishakay.articles.article.dto.CreateArticleResult;
+import com.kishakay.articles.article.dto.SaveSummaryRequest;
 import com.kishakay.articles.article.dto.SummaryPreviewResponse;
 import com.kishakay.articles.article.dto.UpdateArticleRequest;
 import com.kishakay.articles.article.exception.ArticleNotFoundException;
@@ -167,6 +168,29 @@ public class ArticleService {
         try {
             article.edit(request.title(), request.body());
             // Flush so @PreUpdate updatedAt / version are present in the response body.
+            Article saved = articleRepository.saveAndFlush(article);
+            return ArticleResponse.from(saved);
+        } catch (OptimisticLockingFailureException ex) {
+            throw new ArticleVersionConflictException(id, ex);
+        }
+    }
+
+    /**
+     * Saves an author-approved summary on a DRAFT article. Optimistic locking matches
+     * {@link #update}: clients must send the version from their last read. Changing the
+     * summary updates {@code updatedAt} and increments {@code version}. Preview remains
+     * {@link #previewSummary(UUID)} and does not write this field.
+     * <p>
+     * Domain rules (DRAFT-only) live on {@link Article#saveApprovedSummary(String)}.
+     */
+    @Transactional
+    public ArticleResponse saveSummary(UUID id, SaveSummaryRequest request) {
+        Article article = requireArticle(id);
+        if (!Objects.equals(article.getVersion(), request.expectedVersion())) {
+            throw new ArticleVersionConflictException(id);
+        }
+        try {
+            article.saveApprovedSummary(request.summary());
             Article saved = articleRepository.saveAndFlush(article);
             return ArticleResponse.from(saved);
         } catch (OptimisticLockingFailureException ex) {

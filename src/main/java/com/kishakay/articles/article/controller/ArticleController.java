@@ -6,6 +6,7 @@ import com.kishakay.articles.article.dto.ArticlePageResponse;
 import com.kishakay.articles.article.dto.ArticleResponse;
 import com.kishakay.articles.article.dto.CreateArticleRequest;
 import com.kishakay.articles.article.dto.CreateArticleResult;
+import com.kishakay.articles.article.dto.SaveSummaryRequest;
 import com.kishakay.articles.article.dto.SummaryPreviewResponse;
 import com.kishakay.articles.article.dto.UpdateArticleRequest;
 import com.kishakay.articles.article.service.ArticleService;
@@ -35,7 +36,7 @@ import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 @RestController
 @RequestMapping("/articles")
-@Tag(name = "Articles", description = "Create, edit, publish, list, and preview summaries for articles")
+@Tag(name = "Articles", description = "Create, edit, publish, list, preview, and save summaries for articles")
 public class ArticleController {
 
     private final ArticleService articleService;
@@ -200,6 +201,8 @@ public class ArticleController {
     @Operation(
             summary = "Update a draft article",
             description = "Replaces title and body on a DRAFT article. Requires expectedVersion from the last read. "
+                    + "Clears a saved summary only when the body actually changes (title-only or identical-body "
+                    + "edits retain it) in the same transaction with one version increment. "
                     + "Published articles or stale/conflicting versions return 409 Conflict."
     )
     @ApiResponses({
@@ -238,7 +241,9 @@ public class ArticleController {
     @PostMapping("/{id}/summary-preview")
     @Operation(
             summary = "Preview a stub summary",
-            description = "DRAFT-only preview. Does not persist. Stub provider returns a fixed labelled sample string."
+            description = "DRAFT-only preview. Does not persist, approve, or change version/updatedAt/summary. "
+                    + "Stub provider returns a fixed labelled sample string. Author-approved persistence is "
+                    + "PUT /articles/{id}/summary after review."
     )
     @ApiResponses({
             @ApiResponse(
@@ -271,5 +276,45 @@ public class ArticleController {
             @Parameter(description = "Article id", required = true) @PathVariable UUID id
     ) {
         return articleService.previewSummary(id);
+    }
+
+    /**
+     * Persists an author-approved summary on a DRAFT article.
+     * Published → {@code 409}; stale {@code expectedVersion} → {@code 409}; missing → {@code 404}.
+     */
+    @PutMapping("/{id}/summary")
+    @Operation(
+            summary = "Save an author-approved summary",
+            description = "Persists a reviewed summary on a DRAFT article. Requires expectedVersion. "
+                    + "A changed summary updates updatedAt and increments version. "
+                    + "Blank or overlong summaries return 400. Published articles return 409."
+    )
+    @ApiResponses({
+            @ApiResponse(
+                    responseCode = "200",
+                    description = "Summary saved",
+                    content = @Content(schema = @Schema(implementation = ArticleResponse.class))
+            ),
+            @ApiResponse(
+                    responseCode = "400",
+                    description = "Validation failed or malformed UUID",
+                    content = @Content(schema = @Schema(implementation = ApiError.class))
+            ),
+            @ApiResponse(
+                    responseCode = "404",
+                    description = "Article not found",
+                    content = @Content(schema = @Schema(implementation = ApiError.class))
+            ),
+            @ApiResponse(
+                    responseCode = "409",
+                    description = "Published articles cannot be edited, or article version conflict",
+                    content = @Content(schema = @Schema(implementation = ApiError.class))
+            )
+    })
+    public ArticleResponse saveSummary(
+            @Parameter(description = "Article id", required = true) @PathVariable UUID id,
+            @Valid @RequestBody SaveSummaryRequest request
+    ) {
+        return articleService.saveSummary(id, request);
     }
 }

@@ -1,6 +1,7 @@
 package com.kishakay.articles.article.controller;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.reset;
@@ -12,6 +13,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.kishakay.articles.article.domain.Article;
 import com.kishakay.articles.article.domain.ArticleConstraints;
 import com.kishakay.articles.article.dto.CreateArticleRequest;
@@ -97,8 +99,52 @@ class ArticleConcurrencyAndIdempotencyTests extends AbstractPostgresIntegrationT
                 .andReturn();
 
         assertThat(second.getResponse().getContentAsString()).isEqualTo(firstBody);
+        assertThat(firstJson.has("summary")).isTrue();
+        assertThat(firstJson.get("summary").isNull()).isTrue();
         assertThat(articleRepository.count()).isEqualTo(1);
         assertThat(articleRepository.findById(id)).isPresent();
+        assertThat(countIdempotencyRows()).isEqualTo(1);
+    }
+
+    @Test
+    void create_replaysLegacySnapshotMissingSummaryField() throws Exception {
+        String key = nextKey("legacy-summary");
+        String payload = """
+                {
+                  "title": "Legacy snapshot",
+                  "body": "<p>pre-summary field</p>"
+                }
+                """;
+
+        MvcResult first = mockMvc.perform(post("/articles")
+                        .header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(payload))
+                .andExpect(status().isCreated())
+                .andReturn();
+
+        ObjectNode stored = (ObjectNode) objectMapper.readTree(first.getResponse().getContentAsString());
+        stored.remove("summary");
+        String legacySnapshot = objectMapper.writeValueAsString(stored);
+
+        int updated = jdbcTemplate.update(
+                "UPDATE idempotency_records SET response_body = ? WHERE idempotency_key = ?",
+                legacySnapshot,
+                key
+        );
+        assertThat(updated).isEqualTo(1);
+
+        mockMvc.perform(post("/articles")
+                        .header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(payload))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.id").value(stored.get("id").asText()))
+                .andExpect(jsonPath("$.title").value("Legacy snapshot"))
+                .andExpect(jsonPath("$.summary").value(nullValue()))
+                .andExpect(jsonPath("$.version").value(0));
+
+        assertThat(articleRepository.count()).isEqualTo(1);
         assertThat(countIdempotencyRows()).isEqualTo(1);
     }
 
