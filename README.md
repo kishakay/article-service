@@ -19,7 +19,7 @@ Small Java / Spring Boot **Article Management API** interview code sample.
 
 Authentication, search/categories, author review / saving of summaries, and real AI summarization are **not** implemented yet.
 
-**Interview demo:** see [`docs/interview-walkthrough.md`](docs/interview-walkthrough.md) for a reproducible `curl` + `jq` script (idempotent create → edit with version → stub summary → publish → republish → list → 409 → 404), design trade-offs, and known limitations.
+**Interview demo:** the **canonical** runnable script is [`docs/interview-walkthrough.md`](docs/interview-walkthrough.md) (idempotent create → edit with version → stub summary → publish → republish → list → published-immutability `409` → `404`), plus design trade-offs and known limitations.
 
 ### Auth deferred — drafts are readable by id
 
@@ -85,13 +85,13 @@ Also out of scope: frontend / UI, microservices split, search / categories, post
 ## Prerequisites
 
 - Java 21+
-- Maven 3.9+ (3.8+ works), or use the committed Maven Wrapper (`./mvnw`)
-- Docker + Docker Compose (app runtime + Testcontainers for tests)
+- Java build via the committed Maven Wrapper (`./mvnw`; Maven 3.9+ also works)
+- Docker + Docker Compose for the **app** database; Docker for **Testcontainers** during tests/CI (separate Postgres — not Compose)
 - `curl` + `jq` (for the interview walkthrough script)
 
 ## Quick start
 
-### 1. Start PostgreSQL
+### 1. Start PostgreSQL (Compose — app runtime only)
 
 ```bash
 docker compose up -d
@@ -103,12 +103,14 @@ Wait until the container is healthy:
 docker compose ps
 ```
 
+This Compose Postgres is for `./mvnw spring-boot:run`. Integration tests and CI start their own Postgres with Testcontainers and do **not** use this container.
+
 ### 2. Run the application
 
 Defaults match `docker-compose.yml` (`articles` / `articles` / DB `articles` on `localhost:5432`):
 
 ```bash
-mvn spring-boot:run
+./mvnw spring-boot:run
 ```
 
 Or override connection settings:
@@ -117,7 +119,7 @@ Or override connection settings:
 export DB_URL=jdbc:postgresql://localhost:5432/articles
 export DB_USERNAME=articles
 export DB_PASSWORD=articles
-mvn spring-boot:run
+./mvnw spring-boot:run
 ```
 
 On successful startup you should see Flyway apply `V1`–`V6`, then `Started ArticleServiceApplication`.
@@ -259,9 +261,13 @@ Expected:
 Publishing again returns `200` with the **same** `publishedAt` (idempotent; original stamp preserved). Compare with `jq`:
 
 ```bash
-PUBLISHED_AT=$(curl -s -X POST "http://localhost:8080/articles/$ARTICLE_ID/publish" | jq -r '.publishedAt')
+PUBLISH=$(curl -s -X POST "http://localhost:8080/articles/$ARTICLE_ID/publish")
+PUBLISHED_AT=$(echo "$PUBLISH" | jq -r '.publishedAt')
+VERSION=$(echo "$PUBLISH" | jq -r '.version')
 curl -s -X POST "http://localhost:8080/articles/$ARTICLE_ID/publish" | jq -r --arg p "$PUBLISHED_AT" 'select(.publishedAt == $p) | .publishedAt'
 ```
+
+After the create → edit → publish path above, `version` is typically `2` on first publish (create `0`, edit `1`, publish `2`). Republish keeps that version.
 
 Unknown id → `404`. Malformed UUID → `400`. Concurrent optimistic-lock conflicts → `409`.
 
@@ -307,20 +313,22 @@ Notes:
 ### 10. After publish: 409 on edit, 404 on unknown id
 
 ```bash
-# 409 — published articles are immutable in this sample
+# 409 — published immutability (use the version from publish, not a stale 0)
 curl -i -X PUT "http://localhost:8080/articles/$ARTICLE_ID" \
   -H 'Content-Type: application/json' \
-  -d '{"title":"Should fail","body":"<p>nope</p>","expectedVersion":0}'
+  -d "{\"title\":\"Should fail\",\"body\":\"<p>nope</p>\",\"expectedVersion\":$VERSION}"
 
 # 404 — fixed unknown UUID (no need to invent one at random)
 curl -i http://localhost:8080/articles/00000000-0000-4000-8000-000000000000
 ```
 
-For the full scripted path in one block, see [`docs/interview-walkthrough.md`](docs/interview-walkthrough.md).
+Use `$VERSION` from the publish response so the service reaches the published-immutability check (`Published articles cannot be edited`). A stale `expectedVersion` would return `Article version conflict` instead.
+
+For the full scripted path in one block, see [`docs/interview-walkthrough.md`](docs/interview-walkthrough.md) (canonical walkthrough).
 
 ### 11. Tests
 
-Integration tests use **Testcontainers** PostgreSQL (`postgres:16-alpine`). Docker must be available (no external Compose DB required for tests):
+Integration tests use **Testcontainers** PostgreSQL (`postgres:16-alpine`) — a fresh container per suite, not the Compose app database. Docker must be available:
 
 ```bash
 ./mvnw test
@@ -389,7 +397,7 @@ Short list below; trade-offs are expanded in [`docs/interview-walkthrough.md`](d
 - **Publication rules on the domain** — `Article.publish()` is idempotent and stamps `publishedAt` once; the service owns the `@Transactional` boundary.
 - **Edit rules on the domain** — `Article.edit(...)` allows DRAFT only; published → `409` (not an idempotent no-op). Service owns the write transaction; `createdAt` preserved, `updatedAt` via `@PreUpdate`.
 - **Published listing in the database** — `findByStatus(PUBLISHED, pageable)` applies filter + `ORDER BY published_at DESC, id ASC` + limit/offset in SQL; partial index `idx_articles_published_list` supports the access path. Offset is simple for demos; keyset would be stabler under inserts.
-- **Summary preview via replaceable port** — `SummaryProvider` is constructor-injected; `StubSummaryProvider` is the default bean. Preview loads the draft first, then calls the provider **outside** a service-level transaction (`open-in-view` is already `false`) so DB work finishes before summarisation. Typed `SummaryProviderUnavailableException` → `503` only; no catch-all.
+- **Summary preview via replaceable port** — `SummaryProvider` is constructor-injected; `StubSummaryProvider` is the default bean. `previewSummary` is not service-`@Transactional`: the repository `findById` completes in its own short TX, then the provider runs (`open-in-view` is already `false`). Typed `SummaryProviderUnavailableException` → `503` only; no catch-all.
 - **Preview is not a write** — no summary column, no status/timestamp/version mutation; author review / save deferred.
 - **Consistent errors** — `@RestControllerAdvice` maps validation / bad keys / malformed UUIDs / bad pagination (`400`), missing articles (`404`), non-editable / version / idempotency conflicts (`409`), and expected provider unavailability (`503`) to one envelope.
 - **GET by id returns drafts** — intentional for this editorial sample; auth comes later. Collection listing stays published-only.
